@@ -136,6 +136,7 @@ app.get('/cep/:zip', async (req, res) => {
 
 app.post('/checkout', async (req, res) => {
   try {
+    console.time("checkout_total");
     console.log('[checkout] BODY =', req.body); // ajuda nos logs do Render
 
     const payload = req.body;
@@ -144,113 +145,114 @@ app.post('/checkout', async (req, res) => {
       return res.status(400).json({ error: 'items é obrigatório' });
     }
 
-    const orderId = `ord_${Date.now()}`;
-
-    // subtotal só dos itens
-    const subtotalCents = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    // frete grátis por regra: +R$15 se <3 itens (como ACRÉSCIMO, não frete)
+    const subtotal = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
     const totalQty = payload.items.reduce((a, i) => a + i.quantity, 0);
+    const surchargeCents = totalQty < 3 ? 1500 : 0;
+    const totalCents = subtotal + surchargeCents;
 
-    // ✅ Taxa quando < 3 itens: + R$ 15,00 (1500 centavos)
-    const smallOrderFeeCents = totalQty < 3 ? 1500 : 0;
-
-    // total efetivo que vamos cobrar (não é frete!)
-    const totalCents = subtotalCents + smallOrderFeeCents;
-
+    const orderId = `ord_${Date.now()}`;
     const postback_url = process.env.POSTBACK_URL || `http://localhost:${process.env.PORT || 3333}/webhooks/paradise`;
     const anchorProductHash = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
     const LEAN = process.env.PARADISE_LEAN_BODY === "1";
 
-    try {
-      const title = `Pedido ${orderId} — ${totalQty} itens`;
-      const offer_hash = await getOfferForAmount(totalCents, title);
-
-      // ✅ Endereço FIXO (blindado). Ignora completamente o que veio do front.
-      const addr = {
-        line1: "Av. Paulista",
-        number: "1000",
-        complement: "",
-        neighborhood: "Bela Vista",
-        city: "São Paulo",
-        state: "SP",
-        postal_code: "01311000",
-        country: "BR",
-      };
-
-      const customer = {
-        name: payload.customer.name,
-        email: payload.customer.email,
-        document: onlyDigits(payload.customer.document),
-        phone_number: onlyDigits(payload.customer.phone),
-        phone_country_code: "55",
-        zip_code: onlyDigits(addr.postal_code),
-        street_name: addr.line1,
-        number: String(addr.number),
-        complement: addr.complement,
-        neighborhood: addr.neighborhood,
-        city: addr.city,
-        state: addr.state,
-        country: addr.country.toLowerCase(),
-      };
-
-      const cartItem = {
-        product_hash: anchorProductHash,
-        offer_hash,
-        offer: offer_hash,
-        quantity: 1,
-        price: totalCents,
-        unit_price: totalCents,
-        split: false,
-        title: `Pedido ${orderId}`,
-      };
-
-      const paradiseBody = LEAN
-        ? {
-            payment_method: "pix",
-            amount: totalCents,
-            installments: 1,
-            product_hash: anchorProductHash,
-            offer_hash,
-            offer: offer_hash,
-            quantity: 1,
-            customer,
-            // ✅ deixa claro no metadata (auditoria)
-            metadata: { orderId, small_order_fee_cents: String(smallOrderFeeCents), ...payload.metadata },
-            postback_url,
-          }
-        : {
-            payment_method: "pix",
-            amount: totalCents,
-            installments: 1,
-            product_hash: anchorProductHash,
-            offer_hash,
-            offer: offer_hash,
-            quantity: 1,
-            offers: [{ offer_hash, offer: offer_hash, quantity: 1 }],
-            cart: [cartItem],
-            customer,
-            metadata: { orderId, small_order_fee_cents: String(smallOrderFeeCents), ...payload.metadata },
-            postback_url,
-          };
-
-      const data = await createPixTransaction(paradiseBody);
-
-      // resposta compacta pro front
-      return res.json({
-        tx_id: data?.id || data?.tx || data?.tx_id,
-        tx_hash: data?.hash || data?.tx_hash,
-        checkout_url: data?.checkout_url ?? null,
-        has_pix: !!data?.pix,
-        pix: data?.pix || null,
-        raw: data,
-      });
-    } catch (err: any) {
-      console.error('[paradise] FAIL', err);
-      return res.status(500).json({ error: 'paradise_error', detail: String(err?.message || err) });
+    // endereço "safe" — sempre válido, independente do que vier do front
+    const a = payload.shipping?.address || {};
+    function pickOr<T>(v: any, fallback: T): T {
+      const s = String(v ?? "").trim();
+      return (s.length ? (v as any) : fallback) as T;
     }
+    const safeZip = onlyDigits(a.postal_code);
+    const addr = {
+      line1: pickOr(a.line1, "Av. Paulista"),
+      number: String(pickOr((a as any).number, "1000")),
+      complement: pickOr((a as any).complement, ""),
+      neighborhood: pickOr((a as any).neighborhood, "Bela Vista"),
+      city: pickOr(a.city, "São Paulo"),
+      state: pickOr(a.state, "SP"),
+      postal_code: safeZip && safeZip.length === 8 ? safeZip : "01311000",
+      country: (a.country || "BR").toUpperCase(),
+    };
+
+    const customer = {
+      name: pickOr(payload.customer.name, "Cliente Teste"),
+      email: pickOr(payload.customer.email, "cliente@example.com"),
+      document: onlyDigits(payload.customer.document) || "52998224725",
+      phone_number: onlyDigits(payload.customer.phone) || "11999999999",
+      phone_country_code: "55",
+      zip_code: addr.postal_code,
+      street_name: addr.line1,
+      number: addr.number,
+      complement: addr.complement,
+      neighborhood: addr.neighborhood,
+      city: addr.city,
+      state: addr.state,
+      country: (addr.country || "BR").toLowerCase(),
+    };
+
+    // oferta dinâmica (via cache)
+    const title = `Pedido ${orderId} — ${totalQty} itens${surchargeCents ? " (+R$15)" : ""}`;
+    const offer_hash = await getOfferForAmount(totalCents, title);
+
+    // item "âncora" correspondente ao valor total
+    const cartItem = {
+      product_hash: anchorProductHash,
+      offer_hash,
+      offer: offer_hash,
+      quantity: 1,
+      price: totalCents,
+      unit_price: totalCents,
+      split: false,
+      title: `Pedido ${orderId}`,
+    };
+
+    // corpo COMPLETO (LEAN=0) — reduz 422 por validação do gateway
+    const paradiseBody = LEAN
+      ? {
+          payment_method: "pix",
+          amount: totalCents,
+          installments: 1,
+          product_hash: anchorProductHash,
+          offer_hash,
+          offer: offer_hash,
+          quantity: 1,
+          customer,
+          metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
+          postback_url,
+        }
+      : {
+          payment_method: "pix",
+          amount: totalCents,
+          installments: 1,
+          product_hash: anchorProductHash,
+          offer_hash,
+          offer: offer_hash,
+          quantity: 1,
+          offers: [{ offer_hash, offer: offer_hash, quantity: 1 }],
+          cart: [cartItem],
+          customer,
+          metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
+          postback_url,
+        };
+
+    const data = await createPixTransaction(paradiseBody);
+
+    console.timeEnd("checkout_total");
+    // resposta compacta pro front
+    return res.json({
+      tx_id: data?.id || data?.tx || data?.tx_id,
+      tx_hash: data?.hash || data?.tx_hash,
+      checkout_url: data?.checkout_url ?? null,
+      has_pix: !!data?.pix,
+      pix: data?.pix || null,
+      raw: data,
+    });
   } catch (err: any) {
-    const status = err?.response?.status || 500;
-    const data = err?.response?.data || err?.message || err;
-    res.status(status).json({ error: 'server_error', detail: String(data) }); // **sempre JSON**
+    console.timeEnd("checkout_total");
+    const status = err?.response?.status;
+    const detail = err?.response?.data ?? { message: err.message };
+    console.error("Erro no checkout:", status, JSON.stringify(detail, null, 2));
+    return res.status(status || 500).json({ error: "Paradise error", detail });
   }
 });
 
@@ -307,9 +309,15 @@ app.post("/webhooks/paradise", async (req, res) => {
 });
 
 // ---------- Alias para /api/* (compatibilidade) ----------
-app.get("/api/tx/:idOrHash", (req, res) => app._router.handle({ ...req, url: `/tx/${req.params.idOrHash}`, originalUrl: `/tx/${req.params.idOrHash}` } as any, res, () => {}));
-app.get("/api/health", (req, res) => res.json({ ok: true }));
-app.post("/api/webhooks/paradise", (req, res) => app._router.handle({ ...req, url: "/webhooks/paradise", originalUrl: "/webhooks/paradise" } as any, res, () => {}));
+app.post("/api/checkout", (req, res) =>
+  app._router.handle({ ...req, url: "/checkout", originalUrl: "/checkout" } as any, res, () => {})
+);
+app.get("/api/tx/:idOrHash", (req, res) =>
+  app._router.handle({ ...req, url: `/tx/${req.params.idOrHash}`, originalUrl: `/tx/${req.params.idOrHash}` } as any, res, () => {})
+);
+app.post("/api/webhooks/paradise", (req, res) =>
+  app._router.handle({ ...req, url: "/webhooks/paradise", originalUrl: "/webhooks/paradise" } as any, res, () => {})
+);
 
 // ---------- Start ----------
 const PORT = Number(process.env.PORT || 3333);

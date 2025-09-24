@@ -9,7 +9,7 @@ import { useCart, useCartActions } from '@/contexts/CartContext';
 import { useState, useEffect, useMemo } from 'react';
 import PaymentModal from './PaymentModal';
 import { api } from '@/lib/api';
-import { normalizeCart, formatBRLFromCents } from '@/payments/normalize';
+import { toCents, formatBRL } from '@/lib/money';
 import { validateFormLite, CheckoutForm } from '@/lib/validate';
 import { fetchViaCEP } from '@/lib/viacep';
 
@@ -125,33 +125,33 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setBusy(true);
 
     try {
-      const items = normalizeCart(state.items.map(i => ({ 
-        id: i.product?.id || 'produto', 
-        name: i.product?.name || 'Produto', 
-        price: i.product?.price || 0, 
-        quantity: i.quantity 
-      })));
+      const items = state.items.map(i => ({
+        id: String(i.product?.id || 'produto'),
+        name: String(i.product?.name || 'Produto'),
+        price: toCents(i.product?.price || 0),
+        quantity: Number(i.quantity || 1),
+      }));
       
       const payload = {
-        items, // back confere e recalcula taxa lá também
+        items,
         customer: {
           name: form.name,
           email: form.email,
-          document: form.document,
+          document: form.document, // qualquer coisa serve; o back saneia
           phone: form.phone,
         },
-        shipping: { price: 0 }, // ignorado no back
-        metadata: { origem: "site" },
+        // shipping opcional; o back já impõe endereço "safe"
+        // metadata opcional
       };
 
-      const d = await api.postCheckout(payload);
-
-      // ⚠️ NÃO redireciona para d.checkout_url
-      const tx = d.tx_hash || d.session?.id;
-      const pix = d.pix || d.raw?.pix || {};
-      const copia = pix.pix_qr_code || pix.brcode || pix.copia_e_cola || pix.payload || null;
-      const base64 = pix.qr_code_base64 || null;
-
+      const resp = await api.createCheckout(payload) as any;
+      const url = resp.checkout_url || resp.payment_url;
+      if (url) {
+        window.location.href = url; // (se houver)
+        return;
+      }
+      const tx = resp.tx_hash || resp.session?.id;
+      const pix = resp.pix || resp.raw?.pix || {};
       setPixData(pix);
       setOrderInfo({
         txId: tx || "",
@@ -174,18 +174,12 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
 
   // Mostrar a taxa (só visual) quando < 3 itens
   function calcResumo() {
-    const itemsCents = normalizeCart(state.items.map(i => ({ 
-      id: i.product?.id || 'produto', 
-      name: i.product?.name || 'Produto', 
-      price: i.product?.price || 0, 
-      quantity: i.quantity 
-    })));
-
-    const qty = itemsCents.reduce((a, i) => a + i.quantity, 0);
-    const subtotal = itemsCents.reduce((a, i) => a + i.price * i.quantity, 0);
-    const taxa = qty < 3 ? 1500 : 0;
-    const total = subtotal + taxa;
-    return { qty, subtotal, taxa, total };
+    const subtotalCents = state.items.reduce((acc, it) => acc + toCents(it.product?.price || 0) * (it.quantity || 1), 0);
+    const totalQty = state.items.reduce((a, it) => a + (it.quantity || 1), 0);
+    const surchargeCents = totalQty < 3 ? 1500 : 0; // +R$15 se <3 itens
+    const totalCents = subtotalCents + surchargeCents;
+    
+    return { qty: totalQty, subtotal: subtotalCents, taxa: surchargeCents, total: totalCents };
   }
 
   const totalItems = state.items.reduce((total, item) => total + item.quantity, 0);
@@ -627,13 +621,13 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                         <>
                           <div className="flex justify-between text-sm">
                             <span>Subtotal ({qty} itens):</span>
-                            <span className="font-medium">{formatBRLFromCents(subtotal)}</span>
+                            <span className="font-medium">{formatBRL(subtotal)}</span>
                           </div>
                           
                           {qty < 3 && (
                             <div className="flex justify-between text-sm">
                               <span>Taxa pedido mínimo:</span>
-                              <span className="font-medium">{formatBRLFromCents(taxa)}</span>
+                              <span className="font-medium">{formatBRL(taxa)}</span>
                             </div>
                           )}
 
@@ -641,7 +635,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
 
                           <div className="flex justify-between font-bold text-lg">
                             <span>Total:</span>
-                            <span className="text-purple-600">{formatBRLFromCents(total)}</span>
+                            <span className="text-purple-600">{formatBRL(total)}</span>
                           </div>
                         </>
                       );
