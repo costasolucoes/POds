@@ -12,6 +12,7 @@ import { api } from '@/lib/api';
 import { normalizeCart, formatBRL } from '@/lib/money';
 import { validateFormLite } from '@/lib/validate';
 import { fetchViaCEP } from '@/lib/viacep';
+import { buildCheckoutPayload, createCheckout } from '@/payments/checkout';
 
 interface CartSidebarProps {
   isOpen: boolean;
@@ -118,54 +119,45 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setBusy(true);
 
     try {
-      const items = normalizeCart(state.items.map(i => ({
+      const items = state.items.map(i => ({
         id: i.product?.id || 'produto',
         name: i.product?.name || 'Produto',
         price: i.product?.price || 0,
         quantity: i.quantity || 1,
-      })));
+      }));
       
-      const payload = {
-        offerHash: import.meta.env.VITE_OFFER_HASH || "w7jmhixqn2", // Hash da oferta obrigatório
-        items,
-        customer: {
-          name: form.name,
-          email: form.email,
-          document: form.document,
-          phone: form.phone,
-        },
-        shipping: {
-          address: {
-            postal_code: form.postal_code,
-            line1: form.line1,
-            number: form.number,
-            complement: form.complement,
-            neighborhood: form.neighborhood,
-            city: form.city,
-            state: form.state,
-          }
-        }
+      const customer = {
+        name: form.name,
+        email: form.email,
+        document: form.document,
+        phone: form.phone,
       };
 
-      const r = await fetch(api.checkout(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const address = {
+        line1: form.line1,
+        number: form.number,
+        complement: form.complement,
+        neighborhood: form.neighborhood,
+        city: form.city,
+        state: form.state,
+        postal_code: form.postal_code,
+        country: "BR",
+      };
+
+      const payload = buildCheckoutPayload({ items, customer, address });
+      console.log("[checkout payload]", payload); // deve conter offerHash: "w7jmhixqn2"
+
+      const resp = await createCheckout(payload);
+      if (!resp.txId) throw new Error("checkout_failed");
+
+      setPixData({
+        brcode: resp.pixCode,
+        qr_code_base64: resp.qrBase64,
       });
-      const resp = await r.json();
-      
-      const url = resp.checkout_url || resp.payment_url;
-      if (url) {
-        window.location.href = url;
-        return;
-      }
-      const tx = resp.tx_hash || resp.session?.id;
-      const pix = resp.pix || resp.raw?.pix || {};
-      setPixData(pix);
       setOrderInfo({
-        txId: tx || "",
-        txHash: tx || "",
-        orderId: tx || `ord_${Date.now()}`
+        txId: resp.txId,
+        txHash: resp.txId,
+        orderId: resp.txId,
       });
       setPixModalOpen(true);
     } catch (err: any) {

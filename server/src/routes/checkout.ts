@@ -46,16 +46,12 @@ export async function checkoutHandler(req: Request, res: Response) {
     const body = req.body as CheckoutRequest;
     
     // Validação e fallback do offerHash
-    let offerHash = body.offerHash;
+    const envAnchor = process.env.PARADISE_ANCHOR_PRODUCT;
+    const offerHash = body.offerHash || envAnchor;
     if (!offerHash) {
-      offerHash = process.env.OFFER_HASH_DEFAULT || process.env.PARADISE_PRODUCT_HASH || "";
-    }
-    
-    if (!offerHash) {
-      return res.status(400).json({
-        ok: false,
-        error: "checkout_failed",
-        detail: { message: "O hash da oferta é obrigatório" },
+      return res.status(422).json({
+        success: false,
+        message: "O hash da oferta é obrigatório"
       });
     }
     const cart = (body.items || []).map((i) => ({
