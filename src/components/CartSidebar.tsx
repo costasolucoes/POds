@@ -91,27 +91,33 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     observacoes: ''
   });
 
-  // Buscar dados do CEP
+  // NÃO chamar nada de CEP — endereço é sempre FIXO
+  const shouldLookupCep = false;
+  
   const fetchCepData = async (cep: string) => {
-    if (cep.length !== 8) return;
-    
-    setCepLoading(true);
-    try {
-      const data = await getCep(cep);
-      setAddressData(data);
-      setForm(prev => ({
-        ...prev,
-        logradouro: data.street || '',
-        bairro: data.neighborhood || '',
-        cidade: data.city || '',
-        estado: data.state || ''
-      }));
-    } catch (error) {
-      console.error('Erro ao buscar CEP:', error);
-      setAddressData(null);
-    } finally {
-      setCepLoading(false);
+    if (shouldLookupCep) {
+      // nunca entra aqui
+      if (cep.length !== 8) return;
+      
+      setCepLoading(true);
+      try {
+        const data = await getCep(cep);
+        setAddressData(data);
+        setForm(prev => ({
+          ...prev,
+          logradouro: data.street || '',
+          bairro: data.neighborhood || '',
+          cidade: data.city || '',
+          estado: data.state || ''
+        }));
+      } catch (error) {
+        console.error('Erro ao buscar CEP:', error);
+        setAddressData(null);
+      } finally {
+        setCepLoading(false);
+      }
     }
+    // Endereço fixo - não faz nada
   };
 
   // Atualizar CEP quando digitado
@@ -135,8 +141,17 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setLoading(true);
 
     try {
-      // ❗️ Montar payload SEM dados do formulário de endereço
-      const payload = buildPayload(state, {}); // sem utm por enquanto
+      // NÃO use NADA do formulário de endereço.
+      // Se você tem customerName/email/document/phone no form, pegue só esses:
+      const customer = {
+        name: form.nome || "Cliente",
+        email: form.email || "cliente@example.com",
+        document: form.cpf || "52998224725",
+        phone: form.telefone || "+5511999999999",
+      };
+
+      // ❗️ Montar payload com endereço FIXO
+      const payload = buildPayload(state, customer, 0); // frete grátis
       const res = await postCheckout(payload);
 
       // sucesso → redireciona se vier checkoutUrl/order_id
@@ -157,7 +172,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
       }
     } catch (err: any) {
       console.error('Erro no checkout:', err);
-      alert(`Erro ao finalizar: ${err?.error || 'erro'}\n${(err?.detail || '').toString().slice(0, 400)}`);
+      // alert já é mostrado pela função postCheckout
     } finally {
       setLoading(false);
     }

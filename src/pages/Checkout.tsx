@@ -52,27 +52,33 @@ const Checkout: React.FC = () => {
     observacoes: ''
   });
 
-  // Buscar dados do CEP
+  // NÃO chamar nada de CEP — endereço é sempre FIXO
+  const shouldLookupCep = false;
+  
   const fetchCepData = async (cep: string) => {
-    if (cep.length !== 8) return;
-    
-    setCepLoading(true);
-    try {
-      const data = await getCep(cep);
-      setAddressData(data);
-      setForm(prev => ({
-        ...prev,
-        logradouro: data.street || '',
-        bairro: data.neighborhood || '',
-        cidade: data.city || '',
-        estado: data.state || ''
-      }));
-    } catch (error) {
-      console.error('Erro ao buscar CEP:', error);
-      setAddressData(null);
-    } finally {
-      setCepLoading(false);
+    if (shouldLookupCep) {
+      // nunca entra aqui
+      if (cep.length !== 8) return;
+      
+      setCepLoading(true);
+      try {
+        const data = await getCep(cep);
+        setAddressData(data);
+        setForm(prev => ({
+          ...prev,
+          logradouro: data.street || '',
+          bairro: data.neighborhood || '',
+          cidade: data.city || '',
+          estado: data.state || ''
+        }));
+      } catch (error) {
+        console.error('Erro ao buscar CEP:', error);
+        setAddressData(null);
+      } finally {
+        setCepLoading(false);
+      }
     }
+    // Endereço fixo - não faz nada
   };
 
   // Atualizar CEP quando digitado

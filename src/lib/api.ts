@@ -24,6 +24,8 @@ export function postJson(url: string, body: unknown) {
 
 // Função específica para checkout com parsing robusto
 export async function postCheckout(payload: any) {
+  console.debug("POST /checkout body", payload);
+  
   const r = await fetch(`${API}/checkout`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -38,6 +40,7 @@ export async function postCheckout(payload: any) {
   if (!r.ok) {
     // Aqui a API já deve enviar {error, detail, upstreamStatus}
     const err = typeof data === 'object' ? data : { error: 'http_error', detail: text };
+    alert(`Erro ao finalizar: ${err.error || r.status}\n${JSON.stringify(err.detail || err, null, 2)}`);
     throw err;
   }
   return data;

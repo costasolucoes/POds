@@ -1,34 +1,72 @@
 // utils/checkout.ts
 import { moneyToCents } from './money';
 
+// Endereço fixo que SEMPRE vai pra API
+const FIXED_ADDRESS = {
+  line1: "Av. Paulista",
+  number: "1000",
+  neighborhood: "Bela Vista",
+  city: "São Paulo",
+  state: "SP",
+  postal_code: "01311-000",
+  country: "BR",
+};
+
 // types
+type UiCartItem = { 
+  id: string; 
+  name: string; 
+  priceLabel: string | number; 
+  quantity: number 
+};
+
+type Customer = { 
+  name: string; 
+  email: string; 
+  document: string; 
+  phone: string 
+};
+
 type CheckoutItem = {
-  title: string;
-  unit_price_cents: number;
+  id: string;
+  name: string;
+  price: number; // em centavos
   quantity: number;
 };
 
 type CheckoutPayload = {
   items: CheckoutItem[];
-  utm?: Partial<{
-    source: string; medium: string; campaign: string; content: string; term: string;
-  }>;
+  customer: Customer;
+  shipping: {
+    price: number;
+    address: typeof FIXED_ADDRESS;
+  };
+  metadata: { cartId: string };
 };
 
-export function buildCheckoutPayload(cart: any, utm: any): CheckoutPayload {
-  // ❗️ NÃO usar FormData do formulário de endereço aqui.
+const toCents = (v: string | number) => {
+  if (typeof v === "number") return Math.round(v * 100);
+  // "R$ 54,90" -> 5490
+  const n = v.replace(/[^\d,,-.]/g, "").replace(/\./g, "").replace(",", ".");
+  return Math.round(parseFloat(n) * 100);
+};
+
+export function buildCheckoutPayload(cart: any, customer: Customer, shippingPriceCents = 0): CheckoutPayload {
+  const items = cart.items.map((i: any) => ({
+    id: i.product?.id ?? i.id ?? 'produto',
+    name: i.product?.name ?? i.name ?? 'Produto',
+    price: toCents(i.product?.price ?? i.price ?? 0),
+    quantity: Number(i.quantity ?? 1) || 1,
+  }));
+
+  // SEMPRE envia o endereço fixo, ignorando qualquer campo do formulário
   return {
-    items: cart.items.map((i: any) => ({
-      title: i.product?.name ?? i.name ?? 'Produto',
-      unit_price_cents: moneyToCents(i.product?.price ?? i.price ?? 0),
-      quantity: Number(i.quantity ?? 1) || 1,
-    })),
-    utm: utm ? {
-      source: utm.utm_source,
-      medium: utm.utm_medium,
-      campaign: utm.utm_campaign,
-      content: utm.utm_content,
-      term: utm.utm_term,
-    } : undefined,
+    items,
+    customer, // já precisa vir no shape certo {name,email,document,phone}
+    shipping: {
+      price: shippingPriceCents,
+      address: { ...FIXED_ADDRESS },
+    },
+    metadata: { cartId: crypto?.randomUUID?.() ?? String(Date.now()) },
   };
 }
