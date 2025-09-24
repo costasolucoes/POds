@@ -190,6 +190,34 @@ app.post('/checkout', async (req, res) => {
     const offer_hash =
       offerJson?.hash || offerJson?.offer_hash || offerJson?.data?.hash || offerJson?.data?.offer_hash;
 
+    // SEMPRE usar endereço fixo para antifraude, ignorando o que vier do front
+    const addr = {
+      line1: "Av. Paulista",
+      number: "1000",
+      complement: "",
+      neighborhood: "Bela Vista",
+      city: "São Paulo",
+      state: "SP",
+      postal_code: "01311000", // sem traço
+      country: "BR",
+    };
+
+    const customerData = {
+      name: customer?.name || 'Cliente',
+      email: customer?.email || 'cliente@example.com',
+      document: onlyDigits(customer?.document || ''),
+      phone_number: onlyDigits(customer?.phone || '5511999999999'),  // ex: 5511999999999
+      phone_country_code: "55",
+      zip_code: onlyDigits(addr.postal_code),            // 01311000
+      street_name: addr.line1,                           // Av. Paulista
+      number: String(addr.number),
+      complement: addr.complement,
+      neighborhood: addr.neighborhood,
+      city: addr.city,
+      state: addr.state,
+      country: addr.country.toLowerCase(),               // "br"
+    };
+
     // 2) monta o payload SEM depender do front te mandar `cart`
     const txPayload = {
       payment_method: 'pix',
@@ -211,20 +239,16 @@ app.post('/checkout', async (req, res) => {
           title,
         },
       ],
-      customer: {
-        name: customer?.name || 'Cliente',
-        email: customer?.email || 'cliente@example.com',
-        document: customer?.document || '',
-      },
+      customer: customerData,
       shipping: {
         method: 'Normal',
         amount: Number(shipping_cents) || 0, // você disse frete grátis
         address: {
-          line1: address?.street || '',
-          city: address?.city || '',
-          state: address?.state || 'SP',
-          postal_code: address?.zip || '',
-          country: 'BR',
+          line1: addr.line1,
+          city: addr.city,
+          state: addr.state,
+          postal_code: addr.postal_code,
+          country: addr.country,
         },
       },
       metadata: {
