@@ -159,28 +159,44 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const toNumber = (v: any) =>
   (typeof v === "number" ? v : parseFloat(String(v).replace(/[^\d.,-]/g, "").replace(",", "."))) || 0;
 const toCents = (v: any) => {
-  if (typeof v === "number" && Number.isInteger(v) && v > 1000) return v;
+  if (typeof v === "number" && Number.isInteger(v)) return v; // já é centavos
   const c = Math.round(toNumber(v) * 100);
   return isNaN(c) ? 0 : c;
 };
 
-type Item = { id: string; name: string; price: number | string; quantity: number | string };
+type Item = { id?: string; name?: string; title?: string; price: number | string; quantity?: number | string };
 
-function calcTotalCents(items: Item[]): number {
-  if (!Array.isArray(items) || !items.length) return 0;
+function calcItemsTotal(items: Item[]): number {
   return items.reduce((acc, it) => {
     const price = toCents((it as any).price);
-    const qty = parseInt(String((it as any).quantity || 1), 10) || 1;
+    const qty = parseInt(String((it as any).quantity ?? 1), 10) || 1;
     return acc + price * Math.max(1, qty);
   }, 0);
+}
+
+function buildCart(items: Item[], surchargeCents: number): Array<{ title: string; unit_price: number; quantity: number }> {
+  const cart: Array<{ title: string; unit_price: number; quantity: number }> = [];
+
+  for (const it of items) {
+    const title = (it as any).title || (it as any).name || "Item";
+    const unit_price = toCents((it as any).price);
+    const quantity = Math.max(1, parseInt(String((it as any).quantity ?? 1), 10) || 1);
+    cart.push({ title, unit_price, quantity });
+  }
+
+  if (surchargeCents > 0) {
+    cart.push({ title: "Frete", unit_price: surchargeCents, quantity: 1 });
+  }
+
+  return cart;
 }
 
 function mapCustomer(body: any) {
   const c = body?.customer || {};
   const addr = body?.shipping?.address || {};
-  const phoneDigits = onlyDigits(c.phone);
+  const phoneDigits = onlyDigits(c.phone || c.phone_number);
   const docDigits = onlyDigits(c.document);
-  const zipDigits = onlyDigits(addr.postal_code);
+  const zipDigits = onlyDigits(addr.postal_code || addr.zip_code);
 
   const phone_country_code = "55";
   const phone_number = phoneDigits.startsWith("55") ? phoneDigits : `55${phoneDigits || "11999999999"}`;
@@ -192,7 +208,7 @@ function mapCustomer(body: any) {
     phone_number,
     phone_country_code,
     zip_code: zipDigits || "01311000",
-    street_name: addr.line1 || "Av. Paulista",
+    street_name: addr.line1 || addr.street_name || "Av. Paulista",
     number: String(addr.number || "1000"),
     complement: String(addr.complement || ""),
     neighborhood: addr.neighborhood || "Centro",
@@ -202,26 +218,20 @@ function mapCustomer(body: any) {
   };
 }
 
-function titleForOrder(orderId: string, itemsCount: number, surchargeCents: number) {
-  const plus = surchargeCents > 0 ? ` (+R$${Math.round(surchargeCents / 100)})` : "";
+function orderTitle(orderId: string, itemsCount: number, surchargeCents: number) {
+  const plus = surchargeCents > 0 ? ` (+R$${(surchargeCents / 100).toFixed(0)})` : "";
   return `Pedido ${orderId} — ${itemsCount} itens${plus}`;
 }
 
-// -------- Paradise APIs --------
+// ===== Paradise APIs =====
 async function paradiseCreateOffer(productHash: string, priceCents: number, title: string) {
   const url = `${PARADISE_BASE}/products/${productHash}/offers?api_token=${encodeURIComponent(PARADISE_API_TOKEN)}`;
   const body = { title, price: priceCents, amount: priceCents, unit_price: priceCents };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
-  // Em 500, muitos retornam {} — trate como erro
   let d: any = {};
   try { d = await r.json(); } catch {}
-
   if (!r.ok) throw new Error(`create_offer: HTTP ${r.status} - ${JSON.stringify(d)}`);
 
   const offerHash =
@@ -231,52 +241,16 @@ async function paradiseCreateOffer(productHash: string, priceCents: number, titl
   return String(offerHash);
 }
 
-// Plano A: transação com product_hash + offer_hash
-async function paradiseCreateTxWithOffer(offerHash: string, customer: any, metadata: any, postbackUrl: string) {
+async function paradiseTx(body: any, tag: string) {
   const url = `${PARADISE_BASE}/transactions?api_token=${encodeURIComponent(PARADISE_API_TOKEN)}`;
-  const body = {
-    payment_method: "pix",
-    installments: 1,
-    product_hash: PARADISE_PRODUCT_HASH,
-    offer_hash: offerHash,
-    quantity: 1,
-    customer,
-    metadata,
-    postback_url: postbackUrl,
-  };
-
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   let d: any = {};
   try { d = await r.json(); } catch {}
-  if (!r.ok) throw new Error(`create_tx_offer: HTTP ${r.status} - ${JSON.stringify(d)}`);
+  if (!r.ok) throw new Error(`${tag}: HTTP ${r.status} - ${JSON.stringify(d)}`);
   return d;
 }
 
-// Plano B: transação com amount + cart (mínimos) — evita "cart é obrigatório"
-async function paradiseCreateTxWithAmountCart(totalCents: number, orderTitle: string, customer: any, metadata: any, postbackUrl: string) {
-  const url = `${PARADISE_BASE}/transactions?api_token=${encodeURIComponent(PARADISE_API_TOKEN)}`;
-  const body = {
-    payment_method: "pix",
-    installments: 1,
-    product_hash: PARADISE_PRODUCT_HASH,
-    amount: totalCents,
-    quantity: 1,
-    customer,
-    metadata,
-    postback_url: postbackUrl,
-    cart: [
-      { title: orderTitle, unit_price: totalCents, quantity: 1 }
-    ],
-  };
-
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  let d: any = {};
-  try { d = await r.json(); } catch {}
-  if (!r.ok) throw new Error(`create_tx_amount_cart: HTTP ${r.status} - ${JSON.stringify(d)}`);
-  return d;
-}
-
-function normalizeTxResponse(txResp: any) {
+function normalizeTx(txResp: any) {
   const tx_hash =
     txResp?.tx_hash ||
     txResp?.data?.tx_hash ||
@@ -309,63 +283,95 @@ function normalizeTxResponse(txResp: any) {
   return { tx_hash, pix: { brcode, qr_code_base64 }, raw: txResp };
 }
 
-// -------------- HANDLER ---------------
+// ===== Handler =====
 app.post('/checkout', async (req, res) => {
-  try {
-    // CORS básico
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") return res.status(200).end();
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(200).end();
 
+  try {
     const { items = [], shipping = {}, metadata = {} } = req.body || {};
-    if (!Array.isArray(items) || !items.length) {
-      return res.status(400).json({ error: "items é obrigatório" });
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(200).json({ ok: false, error: "bad_request", detail: { message: "items é obrigatório" } });
     }
 
-    const itemsTotal = calcTotalCents(items);
-    const surchargeCents = shipping?.price != null ? toCents(shipping.price) : 1500; // ajuste se tiver outra regra
+    const itemsTotal = calcItemsTotal(items);
+    const surchargeCents = shipping?.price != null ? toCents(shipping.price) : 1500; // se o front já mandar frete, usa; senão usa 15,00
     const totalCents = itemsTotal + (surchargeCents || 0);
 
     if (totalCents < 500) {
-      return res.status(400).json({ error: "valor_mínimo", message: "O valor da compra precisa ser no mínimo R$5,00" });
+      return res.status(200).json({ ok: false, error: "valor_mínimo", detail: { message: "O valor da compra precisa ser no mínimo R$5,00" } });
     }
 
     const orderId = `ord_${Date.now()}`;
-    const orderTitle = titleForOrder(orderId, items.length, surchargeCents || 0);
+    const title = orderTitle(orderId, items.length, surchargeCents || 0);
     const customer = mapCustomer(req.body);
-    const postbackUrl = `${PUBLIC_BASE_URL}/webhooks/paradise`;
+    const postback_url = `${PUBLIC_BASE_URL}/webhooks/paradise`;
     const meta = { ...metadata, orderId, surcharge_cents: String(surchargeCents || 0), origem: metadata?.origem || "hostinger" };
+    const cart = buildCart(items, surchargeCents || 0);
 
-    // ========= Plano A: tentar criar oferta (com retry leve) =========
-    let offerHash: string | null = null;
+    let txResp: any | null = null;
+
+    // Plano A: criar oferta (com retry curto) e usar offer + amount + cart
     try {
+      let offerHash: string | null = null;
       try {
-        offerHash = await paradiseCreateOffer(PARADISE_PRODUCT_HASH, totalCents, orderTitle);
-      } catch (e: any) {
-        // retry 1
-        await sleep(400);
-        offerHash = await paradiseCreateOffer(PARADISE_PRODUCT_HASH, totalCents, orderTitle);
+        offerHash = await paradiseCreateOffer(PARADISE_PRODUCT_HASH, totalCents, title);
+      } catch (e) {
+        await sleep(350);
+        offerHash = await paradiseCreateOffer(PARADISE_PRODUCT_HASH, totalCents, title);
       }
-    } catch (e: any) {
-      console.error("[checkout] create_offer falhou — vai usar Plano B (amount+cart):", e?.message || e);
-      offerHash = null;
+
+      txResp = await paradiseTx(
+        {
+          payment_method: "pix",
+          installments: 1,
+          product_hash: PARADISE_PRODUCT_HASH,
+          offer_hash: offerHash,
+          quantity: 1,
+          amount: totalCents,
+          customer,
+          metadata: meta,
+          postback_url,
+          cart,
+        },
+        "create_tx_offer"
+      );
+    } catch (errA: any) {
+      console.error("[checkout] Plano A falhou, fallback Plano B:", errA?.message || errA);
+
+      // Plano B: sem offer_hash, com amount + cart
+      try {
+        txResp = await paradiseTx(
+          {
+            payment_method: "pix",
+            installments: 1,
+            product_hash: PARADISE_PRODUCT_HASH,
+            quantity: 1,
+            amount: totalCents,
+            customer,
+            metadata: meta,
+            postback_url,
+            cart,
+          },
+          "create_tx_amount_cart"
+        );
+      } catch (errB: any) {
+        console.error("[checkout] Plano B falhou:", errB?.message || errB);
+        return res.status(200).json({
+          ok: false,
+          error: "Paradise error",
+          detail: { message: errB?.message || "Falha ao criar transação" },
+        });
+      }
     }
 
-    let txResp: any;
-
-    if (offerHash) {
-      // ========= Transação com offer =========
-      txResp = await paradiseCreateTxWithOffer(offerHash, customer, meta, postbackUrl);
-    } else {
-      // ========= Fallback: transação com amount + cart =========
-      txResp = await paradiseCreateTxWithAmountCart(totalCents, orderTitle, customer, meta, postbackUrl);
-    }
-
-    const normalized = normalizeTxResponse(txResp);
-    return res.json({ ok: true, ...normalized });
+    const normalized = normalizeTx(txResp);
+    return res.status(200).json({ ok: true, ...normalized });
   } catch (err: any) {
-    console.error("checkout error:", err?.message || err);
-    return res.status(400).json({ error: "Paradise error", detail: { message: err?.message || "Erro inesperado" } });
+    console.error("checkout error (fatal):", err?.message || err);
+    return res.status(200).json({ ok: false, error: "fatal", detail: { message: err?.message || "Erro inesperado" } });
   }
 });
 
