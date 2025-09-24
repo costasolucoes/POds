@@ -1,22 +1,33 @@
 // src/lib/api.ts
-const API = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const API = import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "";
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = path.startsWith("http") ? path : `${API}${path}`;
-  const r = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-    ...init,
+export async function post<T>(path: string, body: any): Promise<T> {
+  const r = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
-  return r.json() as Promise<T>;
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return r.json();
 }
 
+export async function get<T>(path: string): Promise<T> {
+  const r = await fetch(`${API}${path}`);
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return r.json();
+}
+
+// Funções específicas para compatibilidade
 export function createCheckout(body: any) {
-  return http("/checkout", { method: "POST", body: JSON.stringify(body) });
+  return post("/checkout", body);
 }
 
 export function getTx(idOrHash: string) {
-  return http(`/tx/${encodeURIComponent(idOrHash)}`);
+  return get(`/tx/${encodeURIComponent(idOrHash)}`);
+}
+
+export function getCep(zip: string) {
+  return get(`/cep/${zip}`);
 }
 
 // Função específica para checkout com parsing robusto
@@ -43,9 +54,6 @@ export async function postCheckout(payload: any) {
   return data;
 }
 
-// Funções da API
-export const getCep = (zip: string) => http(`${API}/cep/${zip}`);
-export const checkout = (payload: any) => postCheckout(payload);
-
 // Compatibilidade com código existente
+export const checkout = (payload: any) => postCheckout(payload);
 export const api = { createCheckout, getTx };
