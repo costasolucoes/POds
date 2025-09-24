@@ -8,7 +8,7 @@ import { z } from "zod";
 dotenv.config();
 
 const app = express();
-app.use(cors({ origin: ['https://odoutorpds.shop', 'http://localhost:5173'] }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json()); // IMPORTANTE
 
 // ---------- Utils ----------
@@ -26,7 +26,7 @@ const keepAliveAgent = new https.Agent({
   maxFreeSockets: 10,
 });
 const api = axios.create({
-  baseURL: process.env.PARADISE_API_BASE,
+  baseURL: process.env.PARADISE_API_BASE || 'https://api.paradisepagbr.com/api/public/v1',
   httpsAgent: keepAliveAgent,
   headers: { Accept: "application/json", "Content-Type": "application/json" },
   timeout: 12_000,
@@ -162,7 +162,7 @@ app.post('/checkout', async (req, res) => {
 
     // 🔐 envs
     const API_TOKEN = process.env.PARADISE_API_TOKEN!;
-    const PRODUCT_HASH = process.env.PARADISE_PRODUCT_HASH!;
+    const PRODUCT_HASH = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
     const POSTBACK_URL = process.env.POSTBACK_URL || `${process.env.PUBLIC_URL || ''}/webhooks/paradise`;
 
     const base = 'https://api.paradisepagbr.com/api/public/v1';
@@ -269,7 +269,7 @@ app.post('/checkout', async (req, res) => {
 app.get("/tx/:idOrHash", async (req, res) => {
   const idOrHash = req.params.idOrHash;
   const token = process.env.PARADISE_API_TOKEN!;
-  const base = process.env.PARADISE_API_BASE!;
+  const base = process.env.PARADISE_API_BASE || 'https://api.paradisepagbr.com/api/public/v1';
   const isNumeric = /^\d+$/.test(idOrHash);
 
   const urls: string[] = [
