@@ -4,6 +4,7 @@ import { createOffer, createTransaction } from "../services/paradise";
 
 // Validação simples do corpo recebido do front
 type CheckoutRequest = {
+  offerHash?: string;         // Hash da oferta (obrigatório)
   items: Array<{ title: string; price: number; quantity?: number }>;
   shipping?: { price?: number };
   customer: {
@@ -43,6 +44,20 @@ export async function checkoutHandler(req: Request, res: Response) {
     res.setHeader("Vary", "Origin");
 
     const body = req.body as CheckoutRequest;
+    
+    // Validação e fallback do offerHash
+    let offerHash = body.offerHash;
+    if (!offerHash) {
+      offerHash = process.env.OFFER_HASH_DEFAULT || process.env.PARADISE_PRODUCT_HASH || "";
+    }
+    
+    if (!offerHash) {
+      return res.status(400).json({
+        ok: false,
+        error: "checkout_failed",
+        detail: { message: "O hash da oferta é obrigatório" },
+      });
+    }
     const cart = (body.items || []).map((i) => ({
       title: i.title,
       unit_price: toInt(i.price),
@@ -63,10 +78,10 @@ export async function checkoutHandler(req: Request, res: Response) {
     }
 
     // Offer dinâmica — se falhar (500/{}), seguimos sem a oferta
-    let offerHash: string | undefined;
+    let dynamicOfferHash: string | undefined;
     try {
       const offer = await createOffer(amount);
-      offerHash = offer.hash;
+      dynamicOfferHash = offer.hash;
     } catch (e) {
       console.warn("createOffer falhou, seguindo sem offer_hash.", String(e));
     }
@@ -94,7 +109,7 @@ export async function checkoutHandler(req: Request, res: Response) {
       payment_method: body.payment_method || "pix",
       amount,
       installments: 1,
-      product_hash: process.env.PARADISE_PRODUCT_HASH,
+      product_hash: offerHash, // Usa o offerHash como product_hash
       quantity: 1,
       customer,
       metadata: {
@@ -105,9 +120,10 @@ export async function checkoutHandler(req: Request, res: Response) {
       cart, // <- obrigatório p/ Paradise (evita "cart é obrigatório")
     };
 
-    if (offerHash) {
-      payload.offer_hash = offerHash;
-      payload.offer = offerHash;
+    // Se temos dynamicOfferHash, adiciona como offer_hash também
+    if (dynamicOfferHash) {
+      payload.offer_hash = dynamicOfferHash;
+      payload.offer = dynamicOfferHash;
     }
 
     // Log rápido (ajuda debug em produção)
@@ -116,6 +132,7 @@ export async function checkoutHandler(req: Request, res: Response) {
       cart_len: cart.length,
       first_cart: cart[0],
       offerHash,
+      dynamicOfferHash,
     });
 
     // Cria transação PIX

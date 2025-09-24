@@ -126,6 +126,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
       })));
       
       const payload = {
+        offerHash: import.meta.env.VITE_OFFER_HASH || "w7jmhixqn2", // Hash da oferta obrigatório
         items,
         customer: {
           name: form.name,
