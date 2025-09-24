@@ -1,7 +1,7 @@
 // components/PaymentModal.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
-import { getTx } from "@/payments/paradise";
+import { api } from "@/lib/api";
 
 type Props = {
   open: boolean;
@@ -68,7 +68,7 @@ export default function PaymentModal({
 
     const iv = setInterval(async () => {
       try {
-        const d = await getTx(txId);
+        const d = await api.getTx(txId);
 
         setStatus(d.status || "pending");
 

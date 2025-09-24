@@ -8,9 +8,8 @@ import { Minus, Plus, Trash2, ShoppingBag, ArrowLeft, ArrowRight, MapPin, User, 
 import { useCart, useCartActions } from '@/contexts/CartContext';
 import { useState, useEffect } from 'react';
 import PaymentModal from './PaymentModal';
-import { buildCheckoutPayload, createCheckout, CartItem } from '@/payments/paradise';
-import { getCep, postCheckout } from '@/lib/api';
-import { buildCheckoutPayload as buildPayload } from '@/utils/checkout';
+import { api } from '@/lib/api';
+import { normalizeCart, formatBRLFromCents } from '@/payments/normalize';
 
 interface CartSidebarProps {
   isOpen: boolean;
@@ -29,6 +28,7 @@ interface DeliveryForm {
   nome: string;
   email: string;
   telefone: string;
+  cpf: string;
   cep: string;
   logradouro: string;
   numero: string;
@@ -61,7 +61,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
   const [addressData, setAddressData] = useState<AddressData | null>(null);
   const [pixModalOpen, setPixModalOpen] = useState(false);
   const [pixData, setPixData] = useState<{ brcode?: string; qr_code_base64?: string } | null>(null);
-  const [orderInfo, setOrderInfo] = useState<{ id: string; amount: number } | null>(null);
+  const [orderInfo, setOrderInfo] = useState<{ txId: string; txHash: string; orderId: string } | null>(null);
   
 
 
@@ -81,6 +81,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     nome: '',
     email: '',
     telefone: '',
+    cpf: '',
     cep: '',
     logradouro: '',
     numero: '',
@@ -137,49 +138,43 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setLoading(true);
 
     try {
-      // monta payload mínimo (o back ignora endereço)
+      const items = normalizeCart(state.items.map(i => ({ 
+        id: i.product?.id || 'produto', 
+        name: i.product?.name || 'Produto', 
+        price: i.product?.price || 0, 
+        quantity: i.quantity 
+      })));
+      
       const payload = {
-        items: state.items.map(i => ({ 
-          id: i.product?.id || 'produto', 
-          name: i.product?.name || 'Produto', 
-          price: i.product?.price || 0, 
-          quantity: i.quantity 
-        })),
+        items, // back confere e recalcula taxa lá também
         customer: {
           name: form.nome,
           email: form.email,
-          document: form.cpf, // CPF
+          document: form.cpf,
           phone: form.telefone,
         },
-        // shipping/address enviados mas serão ignorados no back (ok)
-        shipping: { price: 0 },
+        shipping: { price: 0 }, // ignorado no back
         metadata: { origem: "site" },
       };
 
-      // ⚠️ use a base do Render (VITE_API_URL)
-      const r = await fetch(`${import.meta.env.VITE_API_URL.replace(/\/$/,'')}/checkout`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const d = await r.json();
+      const d = await api.postCheckout(payload);
 
-      // NUNCA redirecione pra checkout_url aqui — queremos o MODAL
+      // ⚠️ NÃO redireciona para d.checkout_url
       const tx = d.tx_hash || d.session?.id;
       const pix = d.pix || d.raw?.pix || {};
-      const copiaCola = pix.pix_qr_code || pix.brcode || pix.copia_e_cola || pix.payload || null;
+      const copia = pix.pix_qr_code || pix.brcode || pix.copia_e_cola || pix.payload || null;
       const base64 = pix.qr_code_base64 || null;
 
       setPixData(pix);
       setOrderInfo({
         txId: tx || "",
         txHash: tx || "",
-        orderId: d.orderId || `ord_${Date.now()}`
+        orderId: tx || `ord_${Date.now()}`
       });
-      setPixModalOpen(true);                 // ✅ abre o modal
+      setPixModalOpen(true); // ✅ abre modal
     } catch (err: any) {
       console.error('Erro no checkout:', err);
-      alert("Falha ao gerar PIX.");
+      alert("Falha ao gerar PIX");
     } finally {
       setLoading(false);
     }
@@ -212,12 +207,19 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
   }
 
   // Mostrar a taxa (só visual) quando < 3 itens
-  function calcResumo(cart: {price:number, quantity:number}[]) {
-    const itens = cart.reduce((a,i)=> a + i.quantity, 0);
-    const subtotal = cart.reduce((a,i)=> a + i.price*i.quantity, 0);
-    const taxa = itens < 3 ? 1500 : 0;  // centavos
+  function calcResumo() {
+    const itemsCents = normalizeCart(state.items.map(i => ({ 
+      id: i.product?.id || 'produto', 
+      name: i.product?.name || 'Produto', 
+      price: i.product?.price || 0, 
+      quantity: i.quantity 
+    })));
+
+    const qty = itemsCents.reduce((a, i) => a + i.quantity, 0);
+    const subtotal = itemsCents.reduce((a, i) => a + i.price * i.quantity, 0);
+    const taxa = qty < 3 ? 1500 : 0;
     const total = subtotal + taxa;
-    return { itens, subtotal, taxa, total };
+    return { qty, subtotal, taxa, total };
   }
 
   const totalItems = state.items.reduce((total, item) => total + item.quantity, 0);
@@ -622,20 +624,19 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                   
                   <div className="bg-gray-50 rounded-lg p-4 space-y-2">
                     {(() => {
-                      const cartData = state.items.map(i => ({ price: i.product?.price || 0, quantity: i.quantity }));
-                      const { itens, subtotal, taxa, total } = calcResumo(cartData);
+                      const { qty, subtotal, taxa, total } = calcResumo();
                       
                       return (
                         <>
                           <div className="flex justify-between text-sm">
-                            <span>Subtotal ({itens} itens):</span>
-                            <span className="font-medium">{(subtotal/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                            <span>Subtotal ({qty} itens):</span>
+                            <span className="font-medium">{formatBRLFromCents(subtotal)}</span>
                           </div>
                           
-                          {itens < 3 && (
+                          {qty < 3 && (
                             <div className="flex justify-between text-sm">
                               <span>Taxa pedido mínimo:</span>
-                              <span className="font-medium">{(taxa/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                              <span className="font-medium">{formatBRLFromCents(taxa)}</span>
                             </div>
                           )}
 
@@ -643,7 +644,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
 
                           <div className="flex justify-between font-bold text-lg">
                             <span>Total:</span>
-                            <span className="text-purple-600">{(total/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                            <span className="text-purple-600">{formatBRLFromCents(total)}</span>
                           </div>
                         </>
                       );
@@ -670,14 +671,14 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
         <>
           {console.log('Renderizando PaymentModal:', { 
             open: pixModalOpen, 
-            txId: orderInfo.id, 
+            txId: orderInfo.txId, 
             initialBrcode: pixData?.brcode, 
             initialQrBase64: pixData?.qr_code_base64 
           })}
           <PaymentModal
             open={pixModalOpen}
             onClose={handleClosePixModal}
-            txId={orderInfo.id}
+            txId={orderInfo.txId}
             initialBrcode={pixData?.brcode}
             initialQrBase64={pixData?.qr_code_base64}
           />

@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { ArrowLeft, MapPin, User, Mail, Phone, CreditCard } from 'lucide-react';
 import { useCart } from '@/contexts/CartContext';
-import { getCep } from '@/lib/api';
+import { api } from '@/lib/api';
 
 interface AddressData {
   cep: string;
@@ -52,33 +52,29 @@ const Checkout: React.FC = () => {
     observacoes: ''
   });
 
-  // NÃO chamar nada de CEP — endereço é sempre FIXO
-  const shouldLookupCep = false;
-  
-  const fetchCepData = async (cep: string) => {
-    if (shouldLookupCep) {
-      // nunca entra aqui
-      if (cep.length !== 8) return;
-      
-      setCepLoading(true);
-      try {
-        const data = await getCep(cep);
-        setAddressData(data);
-        setForm(prev => ({
-          ...prev,
-          logradouro: data.street || '',
-          bairro: data.neighborhood || '',
-          cidade: data.city || '',
-          estado: data.state || ''
-        }));
-      } catch (error) {
-        console.error('Erro ao buscar CEP:', error);
-        setAddressData(null);
-      } finally {
-        setCepLoading(false);
-      }
+  // CEP → ViaCEP (preenche endereço no front; não envia pro back)
+  const fetchCepData = async (cepInput: string) => {
+    const cep = cepInput.replace(/\D/g, '');
+    if (cep.length !== 8) return;
+    
+    setCepLoading(true);
+    try {
+      const r = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const d = await r.json();
+      if (d.erro) return;
+
+      setForm(prev => ({
+        ...prev,
+        logradouro: d.logradouro || prev.logradouro,
+        bairro: d.bairro || prev.bairro,
+        cidade: d.localidade || prev.cidade,
+        estado: (d.uf || prev.estado || "").toUpperCase(),
+      }));
+    } catch (error) {
+      console.error('Erro ao buscar CEP:', error);
+    } finally {
+      setCepLoading(false);
     }
-    // Endereço fixo - não faz nada
   };
 
   // Atualizar CEP quando digitado
