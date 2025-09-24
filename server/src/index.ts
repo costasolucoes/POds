@@ -8,15 +8,20 @@ import { z } from "zod";
 dotenv.config();
 
 const app = express();
+const allow = [
+  "https://odoutorpds.shop",
+  "https://www.odoutorpds.shop",
+];
+
 app.use(cors({
-  origin: [
-    "https://odoutorpds.hostinger.site",
-    "https://www.odoutorpds.shop",
-  ],
-  credentials: false,
+  origin: (origin, cb) => cb(null, !origin || allow.includes(origin)),
   methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"]
+  allowedHeaders: ["Content-Type","Authorization"],
+  credentials: false,
 }));
+
+// garante preflight
+app.options("*", cors());
 app.use(express.json()); // IMPORTANTE
 
 // ---------- Utils ----------
@@ -164,6 +169,21 @@ app.post('/checkout', async (req, res) => {
     const anchorProductHash = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
     const LEAN = process.env.PARADISE_LEAN_BODY === "1";
 
+    // 🔴 HOTFIX: garantir que Paradise sempre receba cart
+    const FORCE_FULL_CART =
+      String(process.env.PARADISE_LEAN || "").toLowerCase() === "false" ||
+      String(process.env.SEND_LEAN_CART || "").toLowerCase() === "false" ||
+      String(process.env.DISABLE_LEAN || "") === "1";
+
+    // função para converter items em cart válido para Paradise
+    function toCart(items: Array<{id:string; name:string; price:number; quantity:number;}>) {
+      return items.map(it => ({
+        title: it.name,
+        unit_price: it.price,     // em CENTAVOS
+        quantity: it.quantity,
+      }));
+    }
+
     // endereço "safe" — sempre válido, independente do que vier do front
     const a = payload.shipping?.address || {};
     function pickOr<T>(v: any, fallback: T): T {
@@ -215,33 +235,26 @@ app.post('/checkout', async (req, res) => {
     };
 
     // corpo COMPLETO (LEAN=0) — reduz 422 por validação do gateway
-    const paradiseBody = LEAN
-      ? {
-          payment_method: "pix",
-          amount: totalCents,
-          installments: 1,
-          product_hash: anchorProductHash,
-          offer_hash,
-          offer: offer_hash,
-          quantity: 1,
-          customer,
-          metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
-          postback_url,
-        }
-      : {
-          payment_method: "pix",
-          amount: totalCents,
-          installments: 1,
-          product_hash: anchorProductHash,
-          offer_hash,
-          offer: offer_hash,
-          quantity: 1,
-          offers: [{ offer_hash, offer: offer_hash, quantity: 1 }],
-          cart: [cartItem],
-          customer,
-          metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
-          postback_url,
-        };
+    const paradiseBody: any = {
+      payment_method: "pix",
+      amount: totalCents,
+      installments: 1,
+      product_hash: anchorProductHash,
+      offer_hash,
+      offer: offer_hash,
+      quantity: 1,
+      customer,
+      metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
+      postback_url,
+    };
+
+    // 🔴 HOTFIX: se não estiver no modo lean, **sempre** manda o cart
+    if (FORCE_FULL_CART) {
+      paradiseBody.cart = toCart(payload.items);
+    }
+
+    // DEBUG útil (apague depois):
+    console.log("[PAYLOAD->PARADISE]", JSON.stringify(paradiseBody));
 
     const data = await createPixTransaction(paradiseBody);
 
