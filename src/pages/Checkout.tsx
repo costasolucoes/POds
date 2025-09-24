@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { ArrowLeft, MapPin, User, Mail, Phone, CreditCard } from 'lucide-react';
 import { useCart } from '@/contexts/CartContext';
+import { getCep } from '@/lib/api';
 
 interface AddressData {
   cep: string;
@@ -57,20 +58,15 @@ const Checkout: React.FC = () => {
     
     setCepLoading(true);
     try {
-      const response = await fetch(`http://localhost:3333/api/cep/${cep}`);
-      if (response.ok) {
-        const data = await response.json();
-        setAddressData(data);
-        setForm(prev => ({
-          ...prev,
-          logradouro: data.logradouro || '',
-          bairro: data.bairro || '',
-          cidade: data.localidade || '',
-          estado: data.uf || ''
-        }));
-      } else {
-        setAddressData(null);
-      }
+      const data = await getCep(cep);
+      setAddressData(data);
+      setForm(prev => ({
+        ...prev,
+        logradouro: data.street || '',
+        bairro: data.neighborhood || '',
+        cidade: data.city || '',
+        estado: data.state || ''
+      }));
     } catch (error) {
       console.error('Erro ao buscar CEP:', error);
       setAddressData(null);

@@ -1,30 +1,35 @@
 // src/lib/api.ts
-const API = import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "";
+const API = import.meta.env.VITE_API_URL || 'https://pods-p3qt.onrender.com';
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = path.startsWith("http") ? path : `${API}${path}`;
-  const r = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-    ...init,
-  });
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`HTTP ${r.status} on ${url}: ${txt}`);
+// Fetch robusto que lida com respostas não-JSON
+async function fetchJson(url: string, init?: RequestInit) {
+  const res = await fetch(url, init);
+  const ct = res.headers.get('content-type') || '';
+  const data = ct.includes('application/json') ? await res.json() : await res.text();
+
+  if (!res.ok) {
+    const msg = typeof data === 'string' ? data : JSON.stringify(data);
+    throw new Error(`HTTP ${res.status} ${new URL(url).pathname}: ${msg}`);
   }
-  return (await r.json()) as T;
+  return data;
 }
 
+export function postJson(url: string, body: unknown) {
+  return fetchJson(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// Funções da API
+export const getCep = (zip: string) => fetchJson(`${API}/cep/${zip}`);
+export const checkout = (payload: any) => postJson(`${API}/checkout`, payload);
+export const getTx = (idOrHash: string) => fetchJson(`${API}/tx/${encodeURIComponent(idOrHash)}`);
+
+// Compatibilidade com código existente
 export function createCheckout(body: any) {
-  return http<{ tx_hash?: string; session?: { id?: string }; pix?: any; raw?: any; checkout_url?: string }>(
-    "/checkout",
-    { method: "POST", body: JSON.stringify(body) }
-  );
-}
-
-export function getTx(idOrHash: string) {
-  return http<{ status: string; pix?: { brcode?: string; qr_code_base64?: string }; raw: any }>(
-    `/tx/${encodeURIComponent(idOrHash)}`
-  );
+  return checkout(body);
 }
 
 export const api = { createCheckout, getTx };

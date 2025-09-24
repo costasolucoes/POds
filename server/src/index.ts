@@ -8,11 +8,15 @@ import { z } from "zod";
 dotenv.config();
 
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(cors({ origin: ['https://odoutorpds.shop', 'http://localhost:5173'] }));
+app.use(express.json()); // IMPORTANTE
 
 // ---------- Utils ----------
 const onlyDigits = (s?: string) => (s ?? "").replace(/\D/g, "");
+
+function safeParse(s: string) {
+  try { return JSON.parse(s); } catch { return s; }  // nunca explode
+}
 
 // ---------- Axios com Keep-Alive ----------
 const keepAliveAgent = new https.Agent({
@@ -108,8 +112,7 @@ async function createPixTransaction(paradiseBody: any) {
 // ---------- Rotas básicas ----------
 app.get("/health", (_req, res) => res.json({ ok: true, env: process.env.NODE_ENV || "dev" }));
 
-// ✅ alias pros caminhos antigos/novos
-app.get(['/cep/:zip', '/api/cep/:zip'], async (req, res) => {
+app.get('/cep/:zip', async (req, res) => {
   try {
     const zip = (req.params.zip || '').replace(/\D/g, '');
     if (!zip) return res.status(400).json({ error: 'zip inválido' });
@@ -126,15 +129,15 @@ app.get(['/cep/:zip', '/api/cep/:zip'], async (req, res) => {
       city: data.localidade || '',
       state: data.uf || 'SP',
     });
-  } catch (e:any) {
-    console.error('[cep] error', e);
-    return res.status(500).json({ error: 'CEP lookup failed' });
+  } catch (err: any) {
+    res.status(err?.status || 500).json({ error: 'server_error', detail: String(err?.message || err) });
   }
 });
 
-// ✅ mesma função atende /checkout e /api/checkout
-app.post(['/checkout', '/api/checkout'], async (req, res) => {
+app.post('/checkout', async (req, res) => {
   try {
+    console.log('[checkout] BODY =', req.body); // ajuda nos logs do Render
+
     const {
       items = [],                // [{ title, price, quantity }]
       customer = {},
@@ -178,7 +181,8 @@ app.post(['/checkout', '/api/checkout'], async (req, res) => {
         }),
       }
     );
-    const offerJson = await offerResp.json();
+    const offerText = await offerResp.text();
+    const offerJson = safeParse(offerText);
     if (!offerResp.ok) {
       console.error('[paradise] criar oferta FAIL', offerJson);
       return res.status(offerResp.status).json({ error: 'paradise_offer', detail: offerJson });
@@ -239,7 +243,8 @@ app.post(['/checkout', '/api/checkout'], async (req, res) => {
       body: JSON.stringify(txPayload),
     });
 
-    const txJson = await txResp.json();
+    const txText = await txResp.text();
+    const txJson = safeParse(txText);
     if (!txResp.ok) {
       console.error('[paradise] TX FAIL', txJson);
       return res.status(txResp.status).json({ error: 'Paradise error', detail: txJson });
@@ -253,9 +258,10 @@ app.post(['/checkout', '/api/checkout'], async (req, res) => {
       has_pix: !!txJson?.pix,
       pix: txJson?.pix || null,
     });
-  } catch (e: any) {
-    console.error('[checkout] error', e);
-    return res.status(500).json({ error: 'server_error', detail: e?.message || String(e) });
+  } catch (err: any) {
+    const status = err?.response?.status || 500;
+    const data = err?.response?.data || err?.message || err;
+    res.status(status).json({ error: 'server_error', detail: String(data) }); // **sempre JSON**
   }
 });
 

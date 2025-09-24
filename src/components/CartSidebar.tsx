@@ -9,6 +9,7 @@ import { useCart, useCartActions } from '@/contexts/CartContext';
 import { useState, useEffect } from 'react';
 import PaymentModal from './PaymentModal';
 import { buildCheckoutPayload, createCheckout, CartItem } from '@/payments/paradise';
+import { getCep } from '@/lib/api';
 
 interface CartSidebarProps {
   isOpen: boolean;
@@ -95,20 +96,15 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     
     setCepLoading(true);
     try {
-      const response = await fetch(`http://localhost:3333/api/cep/${cep}`);
-      if (response.ok) {
-        const data = await response.json();
-        setAddressData(data);
-        setForm(prev => ({
-          ...prev,
-          logradouro: data.logradouro || '',
-          bairro: data.bairro || '',
-          cidade: data.localidade || '',
-          estado: data.uf || ''
-        }));
-      } else {
-        setAddressData(null);
-      }
+      const data = await getCep(cep);
+      setAddressData(data);
+      setForm(prev => ({
+        ...prev,
+        logradouro: data.street || '',
+        bairro: data.neighborhood || '',
+        cidade: data.city || '',
+        estado: data.state || ''
+      }));
     } catch (error) {
       console.error('Erro ao buscar CEP:', error);
       setAddressData(null);
