@@ -1,21 +1,14 @@
 // payments/paradise.ts
-export type CartItem = {
-  id: string;
-  name: string;
-  price: number | string;  // pode vir "R$ 54,90" ou 54.9
-  quantity: number | string;
-};
-
-export type Customer = {
-  name: string;
-  email: string;
-  document: string;
-  phone: string;
-};
+export type CartItem = { id: string; name: string; price: number | string; quantity: number | string; };
+export type Customer = { name: string; email: string; document: string; phone: string; };
 
 const API_BASE = "https://pods-p3qt.onrender.com";
 
-// ENDEREÇO FIXO — sempre enviado pro backend
+// OPCIONAL: se quiser forçar um ID/nome de produto base específico:
+const BASE_ITEM_ID = "base-offer";
+const BASE_ITEM_NAME = "Pedido Loja (PIX)";
+
+// ENDEREÇO FIXO — SEMPRE enviado
 const FIXED_ADDRESS = {
   line1: "Av. Paulista",
   number: "1000",
@@ -30,37 +23,42 @@ function toCents(v: number | string): number {
   if (typeof v === "number") return Math.round(v * 100);
   const clean = String(v).replace(/[^\d,,-.]/g, "").replace(/\./g, "").replace(",", ".");
   const n = Number.parseFloat(clean);
-  if (Number.isNaN(n)) return 0;
-  return Math.round(n * 100);
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+function sumCartInCents(items: CartItem[]): number {
+  return (items || []).reduce((acc, it) => acc + toCents(it.price) * Number(it.quantity || 1), 0);
 }
 
 export function buildCheckoutPayload(input: {
   items: CartItem[];
   customer: Customer;
-  // address pode ser passado mas SERÁ IGNORADO (vamos sempre usar FIXED_ADDRESS)
-  address?: any;
+  address?: any; // ignorado
   metadata?: Record<string, any>;
 }) {
-  const items = (input.items || []).map((i) => ({
-    id: i.id,
-    name: i.name,
-    price: toCents(i.price),
-    quantity: Number(i.quantity),
-  }));
+  if (!input.items || input.items.length === 0) throw new Error("empty_cart");
+
+  const totalInCents = sumCartInCents(input.items);
+  if (totalInCents <= 0) throw new Error("invalid_total");
+
+  // >>>>> AQUI: 1 item base, qty=1, price = TOTAL DO CARRINHO
+  const baseItem = {
+    id: BASE_ITEM_ID || input.items[0].id,
+    name: BASE_ITEM_NAME || input.items[0].name,
+    price: totalInCents,
+    quantity: 1,
+  };
 
   return {
-    items,
+    items: [baseItem],
     customer: {
       name: input.customer.name,
       email: input.customer.email,
       document: input.customer.document,
       phone: input.customer.phone,
     },
-    shipping: {
-      price: 0,
-      address: { ...FIXED_ADDRESS }, // <— fixo, sempre
-    },
-    metadata: { ...(input.metadata || {}) },
+    shipping: { price: 0, address: { ...FIXED_ADDRESS } },
+    metadata: { ...(input.metadata || {}), cartRaw: input.items.map(i => ({ id: i.id, q: i.quantity })) },
   };
 }
 
@@ -72,14 +70,15 @@ export async function createCheckout(payload: any) {
   });
 
   let data: any = null;
-  try { data = await r.json(); } catch {}
+  try { data = await r.json(); } catch { /* pode vir HTML no 500 */ }
 
   if (!r.ok) {
     console.error("Checkout erro:", r.status, data);
+    // ajuda debugar no browser
+    console.debug("[checkout payload enviado]", payload);
     throw data || { error: "checkout_failed", status: r.status };
   }
 
-  // Normaliza campos de resposta (checkout URL / PIX)
   const p = data || {};
   return {
     checkoutUrl: p.checkout_url || p.checkoutUrl || null,
