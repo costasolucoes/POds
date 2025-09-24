@@ -138,150 +138,115 @@ app.post('/checkout', async (req, res) => {
   try {
     console.log('[checkout] BODY =', req.body); // ajuda nos logs do Render
 
-    const {
-      items = [],                // [{ title, price, quantity }]
-      customer = {},
-      address = {},
-      shipping_cents = 0,
-    } = req.body || {};
+    const payload = req.body;
 
-    if (!Array.isArray(items) || items.length === 0) {
+    if (!payload?.items || !Array.isArray(payload.items) || payload.items.length === 0) {
       return res.status(400).json({ error: 'items é obrigatório' });
     }
 
-    // soma em centavos com fallback pra unit_price/price
-    const amount = items.reduce((acc: number, it: any) => {
-      const q = Number(it.quantity ?? 1);
-      const p = Number(it.unit_price ?? it.price ?? 0);
-      return acc + q * p;
-    }, 0);
-
-    const totalQty = items.reduce((acc: number, it: any) => acc + Number(it.quantity ?? 1), 0);
     const orderId = `ord_${Date.now()}`;
-    const title = `Pedido ${orderId} — ${totalQty} itens`;
 
-    // 🔐 envs
-    const API_TOKEN = process.env.PARADISE_API_TOKEN!;
-    const PRODUCT_HASH = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
-    const POSTBACK_URL = process.env.POSTBACK_URL || `${process.env.PUBLIC_URL || ''}/webhooks/paradise`;
+    // subtotal só dos itens
+    const subtotalCents = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    const totalQty = payload.items.reduce((a, i) => a + i.quantity, 0);
 
-    const base = 'https://api.paradisepagbr.com/api/public/v1';
+    // ✅ Taxa quando < 3 itens: + R$ 15,00 (1500 centavos)
+    const smallOrderFeeCents = totalQty < 3 ? 1500 : 0;
 
-    // 1) cria oferta dinâmica
-    const offerResp = await fetch(
-      `${base}/products/${PRODUCT_HASH}/offers?api_token=${API_TOKEN}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title,
-          price: amount,
-          amount,
-          unit_price: amount,
-        }),
-      }
-    );
-    const offerText = await offerResp.text();
-    const offerJson = safeParse(offerText);
-    if (!offerResp.ok) {
-      console.error('[paradise] criar oferta FAIL', offerJson);
-      return res.status(offerResp.status).json({ error: 'paradise_offer', detail: offerJson });
+    // total efetivo que vamos cobrar (não é frete!)
+    const totalCents = subtotalCents + smallOrderFeeCents;
+
+    const postback_url = process.env.POSTBACK_URL || `http://localhost:${process.env.PORT || 3333}/webhooks/paradise`;
+    const anchorProductHash = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
+    const LEAN = process.env.PARADISE_LEAN_BODY === "1";
+
+    try {
+      const title = `Pedido ${orderId} — ${totalQty} itens`;
+      const offer_hash = await getOfferForAmount(totalCents, title);
+
+      // ✅ Endereço FIXO (blindado). Ignora completamente o que veio do front.
+      const addr = {
+        line1: "Av. Paulista",
+        number: "1000",
+        complement: "",
+        neighborhood: "Bela Vista",
+        city: "São Paulo",
+        state: "SP",
+        postal_code: "01311000",
+        country: "BR",
+      };
+
+      const customer = {
+        name: payload.customer.name,
+        email: payload.customer.email,
+        document: onlyDigits(payload.customer.document),
+        phone_number: onlyDigits(payload.customer.phone),
+        phone_country_code: "55",
+        zip_code: onlyDigits(addr.postal_code),
+        street_name: addr.line1,
+        number: String(addr.number),
+        complement: addr.complement,
+        neighborhood: addr.neighborhood,
+        city: addr.city,
+        state: addr.state,
+        country: addr.country.toLowerCase(),
+      };
+
+      const cartItem = {
+        product_hash: anchorProductHash,
+        offer_hash,
+        offer: offer_hash,
+        quantity: 1,
+        price: totalCents,
+        unit_price: totalCents,
+        split: false,
+        title: `Pedido ${orderId}`,
+      };
+
+      const paradiseBody = LEAN
+        ? {
+            payment_method: "pix",
+            amount: totalCents,
+            installments: 1,
+            product_hash: anchorProductHash,
+            offer_hash,
+            offer: offer_hash,
+            quantity: 1,
+            customer,
+            // ✅ deixa claro no metadata (auditoria)
+            metadata: { orderId, small_order_fee_cents: String(smallOrderFeeCents), ...payload.metadata },
+            postback_url,
+          }
+        : {
+            payment_method: "pix",
+            amount: totalCents,
+            installments: 1,
+            product_hash: anchorProductHash,
+            offer_hash,
+            offer: offer_hash,
+            quantity: 1,
+            offers: [{ offer_hash, offer: offer_hash, quantity: 1 }],
+            cart: [cartItem],
+            customer,
+            metadata: { orderId, small_order_fee_cents: String(smallOrderFeeCents), ...payload.metadata },
+            postback_url,
+          };
+
+      const data = await createPixTransaction(paradiseBody);
+
+      // resposta compacta pro front
+      return res.json({
+        tx_id: data?.id || data?.tx || data?.tx_id,
+        tx_hash: data?.hash || data?.tx_hash,
+        checkout_url: data?.checkout_url ?? null,
+        has_pix: !!data?.pix,
+        pix: data?.pix || null,
+        raw: data,
+      });
+    } catch (err: any) {
+      console.error('[paradise] FAIL', err);
+      return res.status(500).json({ error: 'paradise_error', detail: String(err?.message || err) });
     }
-    const offer_hash =
-      offerJson?.hash || offerJson?.offer_hash || offerJson?.data?.hash || offerJson?.data?.offer_hash;
-
-    // SEMPRE usar endereço fixo para antifraude, ignorando o que vier do front
-    const addr = {
-      line1: "Av. Paulista",
-      number: "1000",
-      complement: "",
-      neighborhood: "Bela Vista",
-      city: "São Paulo",
-      state: "SP",
-      postal_code: "01311000", // sem traço
-      country: "BR",
-    };
-
-    const customerData = {
-      name: customer?.name || 'Cliente',
-      email: customer?.email || 'cliente@example.com',
-      document: onlyDigits(customer?.document || ''),
-      phone_number: onlyDigits(customer?.phone || '5511999999999'),  // ex: 5511999999999
-      phone_country_code: "55",
-      zip_code: onlyDigits(addr.postal_code),            // 01311000
-      street_name: addr.line1,                           // Av. Paulista
-      number: String(addr.number),
-      complement: addr.complement,
-      neighborhood: addr.neighborhood,
-      city: addr.city,
-      state: addr.state,
-      country: addr.country.toLowerCase(),               // "br"
-    };
-
-    // 2) monta o payload SEM depender do front te mandar `cart`
-    const txPayload = {
-      payment_method: 'pix',
-      amount,
-      installments: 1,
-      product_hash: PRODUCT_HASH,
-      offer_hash,
-      quantity: 1,
-      offers: [{ offer_hash, offer: offer_hash, quantity: 1 }],
-      cart: [
-        {
-          product_hash: PRODUCT_HASH,
-          offer_hash,
-          offer: offer_hash,
-          quantity: 1,
-          price: amount,
-          unit_price: amount,
-          split: false,
-          title,
-        },
-      ],
-      customer: customerData,
-      shipping: {
-        method: 'Normal',
-        amount: Number(shipping_cents) || 0, // você disse frete grátis
-        address: {
-          line1: addr.line1,
-          city: addr.city,
-          state: addr.state,
-          postal_code: addr.postal_code,
-          country: addr.country,
-        },
-      },
-      metadata: {
-        orderId,
-        shipping_cents: String(Number(shipping_cents) || 0),
-      },
-      postback_url: POSTBACK_URL,
-    };
-
-    console.log('[paradise] BODY =', JSON.stringify(txPayload, null, 2));
-
-    // 3) cria transação
-    const txResp = await fetch(`${base}/transactions?api_token=${API_TOKEN}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(txPayload),
-    });
-
-    const txText = await txResp.text();
-    const txJson = safeParse(txText);
-    if (!txResp.ok) {
-      console.error('[paradise] TX FAIL', txJson);
-      return res.status(txResp.status).json({ error: 'Paradise error', detail: txJson });
-    }
-
-    // resposta compacta pro front
-    return res.json({
-      tx_id: txJson?.id || txJson?.tx || txJson?.tx_id,
-      tx_hash: txJson?.hash || txJson?.tx_hash,
-      checkout_url: txJson?.checkout_url ?? null,
-      has_pix: !!txJson?.pix,
-      pix: txJson?.pix || null,
-    });
   } catch (err: any) {
     const status = err?.response?.status || 500;
     const data = err?.response?.data || err?.message || err;

@@ -91,33 +91,29 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     observacoes: ''
   });
 
-  // NÃO chamar nada de CEP — endereço é sempre FIXO
-  const shouldLookupCep = false;
-  
-  const fetchCepData = async (cep: string) => {
-    if (shouldLookupCep) {
-      // nunca entra aqui
-      if (cep.length !== 8) return;
-      
-      setCepLoading(true);
-      try {
-        const data = await getCep(cep);
-        setAddressData(data);
-        setForm(prev => ({
-          ...prev,
-          logradouro: data.street || '',
-          bairro: data.neighborhood || '',
-          cidade: data.city || '',
-          estado: data.state || ''
-        }));
-      } catch (error) {
-        console.error('Erro ao buscar CEP:', error);
-        setAddressData(null);
-      } finally {
-        setCepLoading(false);
-      }
+  // CEP → ViaCEP (preenche endereço no front; não envia pro back)
+  const fetchCepData = async (cepInput: string) => {
+    const cep = cepInput.replace(/\D/g, '');
+    if (cep.length !== 8) return;
+    
+    setCepLoading(true);
+    try {
+      const r = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const d = await r.json();
+      if (d.erro) return;
+
+      setForm(prev => ({
+        ...prev,
+        logradouro: d.logradouro || prev.logradouro,
+        bairro: d.bairro || prev.bairro,
+        cidade: d.localidade || prev.cidade,
+        estado: (d.uf || prev.estado || "").toUpperCase(),
+      }));
+    } catch (error) {
+      console.error('Erro ao buscar CEP:', error);
+    } finally {
+      setCepLoading(false);
     }
-    // Endereço fixo - não faz nada
   };
 
   // Atualizar CEP quando digitado
@@ -141,38 +137,49 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setLoading(true);
 
     try {
-      // NÃO use NADA do formulário de endereço.
-      // Se você tem customerName/email/document/phone no form, pegue só esses:
-      const customer = {
-        name: form.nome || "Cliente",
-        email: form.email || "cliente@example.com",
-        document: form.cpf || "52998224725",
-        phone: form.telefone || "+5511999999999",
+      // monta payload mínimo (o back ignora endereço)
+      const payload = {
+        items: state.items.map(i => ({ 
+          id: i.product?.id || 'produto', 
+          name: i.product?.name || 'Produto', 
+          price: i.product?.price || 0, 
+          quantity: i.quantity 
+        })),
+        customer: {
+          name: form.nome,
+          email: form.email,
+          document: form.cpf, // CPF
+          phone: form.telefone,
+        },
+        // shipping/address enviados mas serão ignorados no back (ok)
+        shipping: { price: 0 },
+        metadata: { origem: "site" },
       };
 
-      // ❗️ Montar payload com endereço FIXO
-      const payload = buildPayload(state, customer, 0); // frete grátis
-      const res = await postCheckout(payload);
+      // ⚠️ use a base do Render (VITE_API_URL)
+      const r = await fetch(`${import.meta.env.VITE_API_URL.replace(/\/$/,'')}/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
 
-      // sucesso → redireciona se vier checkoutUrl/order_id
-      if (res?.checkoutUrl) {
-        window.location.assign(res.checkoutUrl);
-      } else if (res?.pix) {
-        // Mostrar modal PIX
-        setPixData(res.pix);
-        setOrderInfo({
-          txId: res.tx_id,
-          txHash: res.tx_hash,
-          orderId: res.order_id || `ord_${Date.now()}`
-        });
-        setPixModalOpen(true);
-      } else {
-        // fallback: mostre confirmação mínima
-        alert('Pedido criado com sucesso');
-      }
+      // NUNCA redirecione pra checkout_url aqui — queremos o MODAL
+      const tx = d.tx_hash || d.session?.id;
+      const pix = d.pix || d.raw?.pix || {};
+      const copiaCola = pix.pix_qr_code || pix.brcode || pix.copia_e_cola || pix.payload || null;
+      const base64 = pix.qr_code_base64 || null;
+
+      setPixData(pix);
+      setOrderInfo({
+        txId: tx || "",
+        txHash: tx || "",
+        orderId: d.orderId || `ord_${Date.now()}`
+      });
+      setPixModalOpen(true);                 // ✅ abre o modal
     } catch (err: any) {
       console.error('Erro no checkout:', err);
-      // alert já é mostrado pela função postCheckout
+      alert("Falha ao gerar PIX.");
     } finally {
       setLoading(false);
     }
@@ -181,6 +188,37 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
   const formatCurrency = (value: number) => {
     return value.toFixed(2).replace('.', ',');
   };
+
+  // Validação de formulário
+  const isEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  const onlyDigits = (s: string) => s.replace(/\D/g, '');
+  const isCPF = (s: string) => onlyDigits(s).length === 11; // (coloque validação real se quiser)
+  const isPhone = (s: string) => onlyDigits(s).length >= 10; // DDD+numero
+  const isCEP = (s: string) => onlyDigits(s).length === 8;
+
+  function isFormValid(f: DeliveryForm) {
+    return (
+      f.nome.trim().length > 2 &&
+      isEmail(f.email) &&
+      isCPF(f.cpf) &&
+      isPhone(f.telefone) &&
+      isCEP(f.cep) &&
+      f.logradouro.trim().length > 2 &&
+      f.numero.trim().length > 0 &&
+      f.bairro.trim().length > 1 &&
+      f.cidade.trim().length > 1 &&
+      /^[A-Z]{2}$/.test(f.estado.toUpperCase())
+    );
+  }
+
+  // Mostrar a taxa (só visual) quando < 3 itens
+  function calcResumo(cart: {price:number, quantity:number}[]) {
+    const itens = cart.reduce((a,i)=> a + i.quantity, 0);
+    const subtotal = cart.reduce((a,i)=> a + i.price*i.quantity, 0);
+    const taxa = itens < 3 ? 1500 : 0;  // centavos
+    const total = subtotal + taxa;
+    return { itens, subtotal, taxa, total };
+  }
 
   const totalItems = state.items.reduce((total, item) => total + item.quantity, 0);
 
@@ -472,6 +510,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                         id="cep"
                         value={form.cep}
                         onChange={(e) => handleInputChange('cep', e.target.value.replace(/\D/g, ''))}
+                        onBlur={(e) => fetchCepData(e.target.value)}
                         placeholder="00000-000"
                         maxLength={8}
                         required
@@ -582,36 +621,40 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                   </h3>
                   
                   <div className="bg-gray-50 rounded-lg p-4 space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span>Subtotal ({totalItems} itens):</span>
-                      <span className="font-medium">R$ {formatCurrency(state.subtotal)}</span>
-                    </div>
-                    
-                    {totalItems < 3 ? (
-                      <div className="flex justify-between text-sm">
-                        <span>Frete:</span>
-                        <span className="font-medium">R$ 15,00</span>
-                      </div>
-                    ) : (
-                      <div className="flex justify-between text-sm text-green-600">
-                        <span>Frete:</span>
-                        <span className="font-medium">GRÁTIS</span>
-                      </div>
-                    )}
+                    {(() => {
+                      const cartData = state.items.map(i => ({ price: i.product?.price || 0, quantity: i.quantity }));
+                      const { itens, subtotal, taxa, total } = calcResumo(cartData);
+                      
+                      return (
+                        <>
+                          <div className="flex justify-between text-sm">
+                            <span>Subtotal ({itens} itens):</span>
+                            <span className="font-medium">{(subtotal/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                          </div>
+                          
+                          {itens < 3 && (
+                            <div className="flex justify-between text-sm">
+                              <span>Taxa pedido mínimo:</span>
+                              <span className="font-medium">{(taxa/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                            </div>
+                          )}
 
-                    <Separator className="bg-gray-300" />
+                          <Separator className="bg-gray-300" />
 
-                    <div className="flex justify-between font-bold text-lg">
-                      <span>Total:</span>
-                      <span className="text-purple-600">R$ {formatCurrency(state.total)}</span>
-                    </div>
+                          <div className="flex justify-between font-bold text-lg">
+                            <span>Total:</span>
+                            <span className="text-purple-600">{(total/100).toLocaleString('pt-BR', {style:'currency', currency:'BRL'})}</span>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
           </div>
           
                 <Button
                   type="submit"
-                  className="w-full bg-green-600 hover:bg-green-700 h-12 text-lg font-semibold"
-                  disabled={loading}
+                  className="w-full bg-green-600 hover:bg-green-700 h-12 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={loading || !isFormValid(form)}
                 >
                   {loading ? '⏳ Processando...' : '✅ Finalizar Pedido'}
                 </Button>
