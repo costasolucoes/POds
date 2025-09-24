@@ -1,0 +1,7 @@
+node_modules
+dist
+.DS_Store
+.env
+server/node_modules
+server/dist
+server/.env
