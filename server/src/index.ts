@@ -31,24 +31,6 @@ function safeParse(s: string) {
   try { return JSON.parse(s); } catch { return s; }  // nunca explode
 }
 
-// ---------- Paradise Utils ----------
-type ItemIn = { id:string; name:string; price:number; quantity:number };
-
-function toCart(items: ItemIn[]) {
-  // Paradise espera estes campos:
-  //  - title        (string)
-  //  - unit_price   (number, em CENTAVOS)
-  //  - quantity     (number)
-  return items.map(it => ({
-    title: it.name,
-    unit_price: it.price,     // já em CENTAVOS
-    quantity: it.quantity,
-  }));
-}
-
-function calcAmountCents(items: ItemIn[]) {
-  return items.reduce((acc, it) => acc + (Number(it.price) * Number(it.quantity)), 0);
-}
 
 // ---------- Axios com Keep-Alive ----------
 const keepAliveAgent = new https.Agent({
@@ -166,107 +148,249 @@ app.get('/cep/:zip', async (req, res) => {
   }
 });
 
+// ====== ENV OBRIGATÓRIAS ======
+const PARADISE_API_TOKEN = process.env.PARADISE_API_TOKEN!; // ex: "P7S..."
+const PARADISE_PRODUCT_HASH = process.env.PARADISE_PRODUCT_HASH!; // ex: "w7jmhixqn2"
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://pods-p3qt.onrender.com";
+// ==================================
+
+const PARADISE_BASE = "https://api.paradisepagbr.com/api/public/v1";
+
+const toNumber = (v: any) =>
+  (typeof v === "number" ? v : parseFloat(String(v).replace(/[^\d.,-]/g, "").replace(",", "."))) || 0;
+const toCents = (v: any) => {
+  const n = toNumber(v);
+  // se v já vier inteiro alto (ex.: 4990), mantenha
+  if (typeof v === "number" && Number.isInteger(v) && v > 1000) return v;
+  const c = Math.round(n * 100);
+  return isNaN(c) ? 0 : c;
+};
+
+type Item = { id: string; name: string; price: number | string; quantity: number | string };
+
+function calcTotalCents(items: Item[]): number {
+  if (!Array.isArray(items) || !items.length) return 0;
+  return items.reduce((acc, it) => {
+    const price = toCents((it as any).price);
+    const qty = parseInt(String((it as any).quantity || 1), 10) || 1;
+    return acc + price * Math.max(1, qty);
+  }, 0);
+}
+
+function mapCustomer(body: any) {
+  const c = body?.customer || {};
+  const addr = body?.shipping?.address || {};
+  const phoneDigits = onlyDigits(c.phone);
+  const docDigits = onlyDigits(c.document);
+  const zipDigits = onlyDigits(addr.postal_code);
+
+  // DDD/País (simples e robusto)
+  const phone_country_code = phoneDigits.startsWith("55") ? "55" : "55";
+  const phone_number =
+    phoneDigits.startsWith("55") ? phoneDigits : `55${phoneDigits || "11999999999"}`;
+
+  return {
+    name: c.name || "Cliente",
+    email: c.email || "cliente@example.com",
+    document: docDigits || "52998224725",
+    phone_number,
+    phone_country_code,
+    zip_code: zipDigits || "01311000",
+    street_name: addr.line1 || "Av. Paulista",
+    number: String(addr.number || "1000"),
+    complement: String(addr.complement || ""),
+    neighborhood: addr.neighborhood || "Centro",
+    city: addr.city || "São Paulo",
+    state: addr.state || "SP",
+    country: "br",
+  };
+}
+
+function buildOfferTitle(orderId: string, itemsCount: number, surchargeCents: number) {
+  const plus = surchargeCents > 0 ? ` (+R$${(surchargeCents / 100).toFixed(0)})` : "";
+  return `Pedido ${orderId} — ${itemsCount} itens${plus}`;
+}
+
+async function paradiseCreateOffer({
+  productHash,
+  priceCents,
+  title,
+}: {
+  productHash: string;
+  priceCents: number;
+  title: string;
+}): Promise<string> {
+  const url = `${PARADISE_BASE}/products/${productHash}/offers?api_token=${encodeURIComponent(
+    PARADISE_API_TOKEN
+  )}`;
+
+  const body = {
+    title,
+    price: priceCents,
+    amount: priceCents,
+    unit_price: priceCents,
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(`create_offer: HTTP ${r.status} - ${JSON.stringify(d)}`);
+  }
+
+  // Tenta várias chaves comuns para o hash da oferta
+  const offerHash =
+    d?.data?.hash || d?.data?.offer_hash || d?.offer_hash || d?.hash || d?.data?.code;
+  if (!offerHash) {
+    throw new Error(`create_offer: resposta sem offer_hash: ${JSON.stringify(d)}`);
+  }
+  return String(offerHash);
+}
+
+async function paradiseCreateTransaction({
+  productHash,
+  offerHash,
+  customer,
+  metadata,
+  postbackUrl,
+}: {
+  productHash: string;
+  offerHash: string;
+  customer: any;
+  metadata: Record<string, any>;
+  postbackUrl: string;
+}) {
+  const url = `${PARADISE_BASE}/transactions?api_token=${encodeURIComponent(
+    PARADISE_API_TOKEN
+  )}`;
+
+  // *** IMPORTANTE ***
+  // Sem `amount` e sem `cart` aqui. A Paradise usará o preço da OFERTA.
+  const body = {
+    payment_method: "pix",
+    installments: 1,
+    product_hash: productHash,
+    offer_hash: offerHash,
+    quantity: 1,
+    customer,
+    metadata,
+    postback_url: postbackUrl,
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(`create_tx: HTTP ${r.status} - ${JSON.stringify(d)}`);
+  }
+  return d;
+}
+
+// ============ HANDLER =============
 app.post('/checkout', async (req, res) => {
   try {
-    console.time("checkout_total");
-    console.log('[checkout] BODY =', req.body); // ajuda nos logs do Render
+    // CORS básico (caso seu middleware global não trate)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") return res.status(200).end();
 
-    // garanta que veio items
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
-    if (!items.length) {
-      return res.status(400).json({ error: "items vazios" });
+    const { items = [], shipping = {}, metadata = {} } = req.body || {};
+
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: "items é obrigatório" });
     }
 
-    // frete grátis por regra: +R$15 se <3 itens (como ACRÉSCIMO, não frete)
-    const subtotal = items.reduce((acc, it) => acc + it.price * it.quantity, 0);
-    const totalQty = items.reduce((a, i) => a + i.quantity, 0);
-    const surchargeCents = totalQty < 3 ? 1500 : 0;
-    const totalCents = subtotal + surchargeCents;
+    // 1) Soma carrinho
+    const itemsTotal = calcTotalCents(items);
+
+    // 2) Frete (ex.: R$15 quando aplicável). Se seu critério for diferente, ajuste aqui.
+    const surchargeCents = shipping?.price ? toCents(shipping.price) : 1500; // <= troque conforme sua regra
+    const totalCents = itemsTotal + (surchargeCents || 0);
+
+    if (totalCents < 500) {
+      // A Paradise exige mínimo R$5
+      return res.status(400).json({
+        error: "valor_mínimo",
+        message: "O valor da compra precisa ser no mínimo R$5,00",
+      });
+    }
 
     const orderId = `ord_${Date.now()}`;
-    const postback_url = process.env.POSTBACK_URL || `http://localhost:${process.env.PORT || 3333}/webhooks/paradise`;
-    const anchorProductHash = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
+    const title = buildOfferTitle(orderId, items.length, surchargeCents || 0);
 
-    // endereço "safe" — sempre válido, independente do que vier do front
-    const a = req.body.shipping?.address || {};
-    function pickOr<T>(v: any, fallback: T): T {
-      const s = String(v ?? "").trim();
-      return (s.length ? (v as any) : fallback) as T;
-    }
-    const safeZip = onlyDigits(a.postal_code);
-    const addr = {
-      line1: pickOr(a.line1, "Av. Paulista"),
-      number: String(pickOr((a as any).number, "1000")),
-      complement: pickOr((a as any).complement, ""),
-      neighborhood: pickOr((a as any).neighborhood, "Bela Vista"),
-      city: pickOr(a.city, "São Paulo"),
-      state: pickOr(a.state, "SP"),
-      postal_code: safeZip && safeZip.length === 8 ? safeZip : "01311000",
-      country: (a.country || "BR").toUpperCase(),
-    };
+    const customer = mapCustomer(req.body);
+    const postbackUrl = `${PUBLIC_BASE_URL}/webhooks/paradise`;
 
-    const customer = {
-      name: pickOr(req.body.customer.name, "Cliente Teste"),
-      email: pickOr(req.body.customer.email, "cliente@example.com"),
-      document: onlyDigits(req.body.customer.document) || "52998224725",
-      phone_number: onlyDigits(req.body.customer.phone) || "11999999999",
-      phone_country_code: "55",
-      zip_code: addr.postal_code,
-      street_name: addr.line1,
-      number: addr.number,
-      complement: addr.complement,
-      neighborhood: addr.neighborhood,
-      city: addr.city,
-      state: addr.state,
-      country: (addr.country || "BR").toLowerCase(),
-    };
+    // 3) CRIA OFERTA COM O VALOR FINAL
+    const offerHash = await paradiseCreateOffer({
+      productHash: PARADISE_PRODUCT_HASH,
+      priceCents: totalCents,
+      title,
+    });
 
-    // oferta dinâmica (via cache)
-    const title = `Pedido ${orderId} — ${totalQty} itens${surchargeCents ? " (+R$15)" : ""}`;
-    const offer_hash = await getOfferForAmount(totalCents, title);
-
-    // MONTE o body da Paradise
-    const paradiseBody: any = {
-      payment_method: "pix",
-      amount: totalCents,
-      installments: 1,
-      product_hash: anchorProductHash,
-      offer_hash,
-      offer: offer_hash,
-      quantity: 1,
+    // 4) CRIA TRANSAÇÃO PIX usando APENAS product_hash + offer_hash
+    const txResp = await paradiseCreateTransaction({
+      productHash: PARADISE_PRODUCT_HASH,
+      offerHash,
       customer,
-      metadata: { orderId, surcharge_cents: String(surchargeCents), ...req.body.metadata },
-      postback_url,
-    };
+      metadata: {
+        ...metadata,
+        orderId,
+        surcharge_cents: String(surchargeCents || 0),
+        origem: metadata?.origem || "hostinger",
+      },
+      postbackUrl,
+    });
 
-    // 🔴 OBRIGATÓRIO: envie SEMPRE o cart
-    paradiseBody.cart = toCart(items);
+    // 5) NORMALIZA RESPOSTA PRO FRONT
+    const tx_hash =
+      txResp?.tx_hash ||
+      txResp?.data?.tx_hash ||
+      txResp?.data?.transaction?.hash ||
+      txResp?.data?.hash ||
+      txResp?.id ||
+      null;
 
-    // DEBUG (ajuda muito agora; remova depois)
-    console.log("[PAYLOAD->PARADISE]", JSON.stringify({
-      amount: paradiseBody.amount,
-      cart_len: paradiseBody.cart?.length,
-      first_cart: paradiseBody.cart?.[0],
-    }, null, 2));
+    const pix =
+      txResp?.pix ||
+      txResp?.data?.pix ||
+      txResp?.transaction?.pix ||
+      {
+        // tenta campos comuns
+        brcode:
+          txResp?.pix_qr_code ||
+          txResp?.data?.pix_qr_code ||
+          txResp?.brcode ||
+          txResp?.data?.brcode ||
+          null,
+        qr_code_base64:
+          txResp?.qr_code_base64 ||
+          txResp?.data?.qr_code_base64 ||
+          null,
+      };
 
-    const data = await createPixTransaction(paradiseBody);
-
-    console.timeEnd("checkout_total");
-    // resposta compacta pro front
     return res.json({
-      tx_id: data?.id || data?.tx || data?.tx_id,
-      tx_hash: data?.hash || data?.tx_hash,
-      checkout_url: data?.checkout_url ?? null,
-      has_pix: !!data?.pix,
-      pix: data?.pix || null,
-      raw: data,
+      ok: true,
+      tx_hash,
+      pix,
+      raw: txResp,
     });
   } catch (err: any) {
-    console.timeEnd("checkout_total");
-    const status = err?.response?.status;
-    const detail = err?.response?.data ?? { message: err.message };
-    console.error("Erro no checkout:", status, JSON.stringify(detail, null, 2));
-    return res.status(status || 500).json({ error: "Paradise error", detail });
+    console.error("checkout error:", err?.message || err);
+    // Tenta extrair mensagem da Paradise
+    const msg =
+      err?.message?.includes("HTTP")
+        ? err.message
+        : (err?.message || "Erro inesperado");
+    return res.status(400).json({ error: "Paradise error", detail: { message: msg } });
   }
 });
 
