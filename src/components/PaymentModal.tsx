@@ -68,7 +68,8 @@ export default function PaymentModal({
 
     const iv = setInterval(async () => {
       try {
-        const d = await api.getTx(txId);
+        const r = await fetch(api.tx(txId));
+        const d = await r.json();
 
         setStatus(d.status || "pending");
 

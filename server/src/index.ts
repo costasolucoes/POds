@@ -8,7 +8,15 @@ import { z } from "zod";
 dotenv.config();
 
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin: [
+    "https://odoutorpds.hostinger.site",
+    "https://www.odoutorpds.shop",
+  ],
+  credentials: false,
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"]
+}));
 app.use(express.json()); // IMPORTANTE
 
 // ---------- Utils ----------

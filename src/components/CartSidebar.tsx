@@ -9,8 +9,8 @@ import { useCart, useCartActions } from '@/contexts/CartContext';
 import { useState, useEffect, useMemo } from 'react';
 import PaymentModal from './PaymentModal';
 import { api } from '@/lib/api';
-import { toCents, formatBRL } from '@/lib/money';
-import { validateFormLite, CheckoutForm } from '@/lib/validate';
+import { normalizeCart, formatBRL } from '@/lib/money';
+import { validateFormLite } from '@/lib/validate';
 import { fetchViaCEP } from '@/lib/viacep';
 
 interface CartSidebarProps {
@@ -56,20 +56,26 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     onClose();
   };
   
-  const [form, setForm] = useState<CheckoutForm>({
+  const [form, setForm] = useState({
     name: "",
     email: "",
     document: "",
     phone: "",
-    address: { cep: "", street: "", number: "", complement: "", neighborhood: "", city: "", state: "" },
+    postal_code: "",
+    line1: "",
+    number: "",
+    complement: "",
+    neighborhood: "",
+    city: "",
+    state: "",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
 
   // Validação "lite"
-  const { ok: formOk, errors: lastErrors } = useMemo(() => validateFormLite(form), [form]);
-  useEffect(() => setErrors(lastErrors), [lastErrors]);
+  const v = validateFormLite(form);
+  const formOk = v.ok;
 
   function markTouched(path: string) {
     setTouched((p) => ({ ...p, [path]: true }));
@@ -87,67 +93,69 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
   }
 
   // CEP → ViaCEP (preenche endereço no front; não envia pro back)
-  async function onBlurCEP() {
+  async function onCepBlur(cep: string) {
+    const zip = cep.replace(/\D/g, "");
+    if (zip.length !== 8) return;
     try {
-      const d = (form.address.cep || "").replace(/\D/g, "");
-      if (d.length !== 8) return; // ignora — não trava
-      setCepLoading(true);
-      const a = await fetchViaCEP(form.address.cep);
-      setForm((prev) => ({
-        ...prev,
-        address: {
-          ...prev.address,
-          street: a.street || prev.address.street,
-          neighborhood: a.neighborhood || prev.address.neighborhood,
-          city: a.city || prev.address.city,
-          state: a.state || prev.address.state,
-        },
-      }));
+      const r = await fetch(`https://viacep.com.br/ws/${zip}/json/`);
+      const d = await r.json();
+      if (!d.erro) {
+        setForm(f => ({
+          ...f,
+          line1: d.logradouro || f.line1,
+          neighborhood: d.bairro || f.neighborhood,
+          city: d.localidade || f.city,
+          state: d.uf || f.state,
+        }));
+      }
     } catch {}
-    finally { setCepLoading(false); }
   }
 
 
   async function onFinalizarClick() {
-    const v = validateFormLite(form);
-    setErrors(v.errors);
-    const touchedAll: Record<string, boolean> = {};
-    Object.keys(v.errors).forEach((k) => (touchedAll[k] = true));
-    setTouched((t) => ({ ...t, ...touchedAll }));
-
-    if (!v.ok) {
-      const first = Object.keys(v.errors)[0];
-      document.querySelector<HTMLElement>(`[data-field="${first}"]`)?.focus?.();
-      return;
-    }
-
+    if (!formOk) return;
     if (busy) return;
     setBusy(true);
 
     try {
-      const items = state.items.map(i => ({
-        id: String(i.product?.id || 'produto'),
-        name: String(i.product?.name || 'Produto'),
-        price: toCents(i.product?.price || 0),
-        quantity: Number(i.quantity || 1),
-      }));
+      const items = normalizeCart(state.items.map(i => ({
+        id: i.product?.id || 'produto',
+        name: i.product?.name || 'Produto',
+        price: i.product?.price || 0,
+        quantity: i.quantity || 1,
+      })));
       
       const payload = {
         items,
         customer: {
           name: form.name,
           email: form.email,
-          document: form.document, // qualquer coisa serve; o back saneia
+          document: form.document,
           phone: form.phone,
         },
-        // shipping opcional; o back já impõe endereço "safe"
-        // metadata opcional
+        shipping: {
+          address: {
+            postal_code: form.postal_code,
+            line1: form.line1,
+            number: form.number,
+            complement: form.complement,
+            neighborhood: form.neighborhood,
+            city: form.city,
+            state: form.state,
+          }
+        }
       };
 
-      const resp = await api.createCheckout(payload) as any;
+      const r = await fetch(api.checkout(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const resp = await r.json();
+      
       const url = resp.checkout_url || resp.payment_url;
       if (url) {
-        window.location.href = url; // (se houver)
+        window.location.href = url;
         return;
       }
       const tx = resp.tx_hash || resp.session?.id;
@@ -158,7 +166,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
         txHash: tx || "",
         orderId: tx || `ord_${Date.now()}`
       });
-      setPixModalOpen(true); // ✅ abre modal
+      setPixModalOpen(true);
     } catch (err: any) {
       console.error('Erro no checkout:', err);
       alert("Falha ao gerar PIX");
@@ -174,8 +182,15 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
 
   // Mostrar a taxa (só visual) quando < 3 itens
   function calcResumo() {
-    const subtotalCents = state.items.reduce((acc, it) => acc + toCents(it.product?.price || 0) * (it.quantity || 1), 0);
-    const totalQty = state.items.reduce((a, it) => a + (it.quantity || 1), 0);
+    const cart = normalizeCart(state.items.map(i => ({
+      id: i.product?.id || 'produto',
+      name: i.product?.name || 'Produto',
+      price: i.product?.price || 0,
+      quantity: i.quantity || 1,
+    })));
+    
+    const subtotalCents = cart.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    const totalQty = cart.reduce((a, it) => a + it.quantity, 0);
     const surchargeCents = totalQty < 3 ? 1500 : 0; // +R$15 se <3 itens
     const totalCents = subtotalCents + surchargeCents;
     
@@ -420,53 +435,49 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                   <div className="space-y-2">
                     <Label htmlFor="nome" className="text-sm font-medium">Nome Completo *</Label>
                     <Input
-                      data-field="name"
                       id="nome"
                       value={form.name}
-                      onChange={(e) => onChange("name", e.target.value)}
-                      onBlur={() => markTouched("name")}
+                      onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
                       required
                       className="h-9"
                       placeholder="Digite seu nome completo"
                     />
-                    {touched["name"] && errors["name"] && (
-                      <p className="text-red-600 text-xs mt-1">{errors["name"]}</p>
-                    )}
                   </div>
 
                   <div className="space-y-3">
                     <div className="space-y-2">
                       <Label htmlFor="email" className="text-sm font-medium">E-mail *</Label>
                       <Input
-                        data-field="email"
                         id="email"
                         type="email"
                         value={form.email}
-                        onChange={(e) => onChange("email", e.target.value)}
-                        onBlur={() => markTouched("email")}
+                        onChange={(e) => setForm(f => ({ ...f, email: e.target.value }))}
                         required
                         className="h-9"
                         placeholder="seu@email.com"
                       />
-                      {touched["email"] && errors["email"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["email"]}</p>
-                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="document" className="text-sm font-medium">CPF *</Label>
+                      <Input
+                        id="document"
+                        value={form.document}
+                        onChange={(e) => setForm(f => ({ ...f, document: e.target.value }))}
+                        placeholder="000.000.000-00"
+                        required
+                        className="h-9"
+                      />
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="telefone" className="text-sm font-medium">Telefone *</Label>
                       <Input
-                        data-field="phone"
                         id="telefone"
                         value={form.phone}
-                        onChange={(e) => onChange("phone", e.target.value)}
-                        onBlur={() => markTouched("phone")}
+                        onChange={(e) => setForm(f => ({ ...f, phone: e.target.value }))}
                         placeholder="(11) 99999-9999"
                         required
                         className="h-9"
                       />
-                      {touched["phone"] && errors["phone"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["phone"]}</p>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -484,19 +495,15 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                     <div className="space-y-2">
                       <Label htmlFor="cep" className="text-sm font-medium">CEP *</Label>
                       <Input
-                        data-field="address.cep"
                         id="cep"
-                        value={form.address.cep}
-                        onChange={(e) => onChange("address.cep", e.target.value.replace(/\D/g, ''))}
-                        onBlur={() => { markTouched("address.cep"); onBlurCEP(); }}
+                        value={form.postal_code}
+                        onChange={(e) => setForm(f => ({ ...f, postal_code: e.target.value.replace(/\D/g, '') }))}
+                        onBlur={(e) => onCepBlur(e.target.value)}
                         placeholder="00000-000"
                         maxLength={8}
                         required
                         className="h-9"
                       />
-                      {touched["address.cep"] && errors["address.cep"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["address.cep"]}</p>
-                      )}
                       {cepLoading && (
                         <p className="text-xs text-blue-600">🔍 Buscando CEP...</p>
                       )}
@@ -505,18 +512,13 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                     <div className="space-y-2">
                       <Label htmlFor="logradouro" className="text-sm font-medium">Logradouro *</Label>
                       <Input
-                        data-field="address.street"
                         id="logradouro"
-                        value={form.address.street}
-                        onChange={(e) => onChange("address.street", e.target.value)}
-                        onBlur={() => markTouched("address.street")}
+                        value={form.line1}
+                        onChange={(e) => setForm(f => ({ ...f, line1: e.target.value }))}
                         required
                         className="h-9"
                         placeholder="Rua, Avenida, etc."
                       />
-                      {touched["address.street"] && errors["address.street"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["address.street"]}</p>
-                      )}
                     </div>
                   </div>
 
@@ -524,25 +526,20 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                     <div className="space-y-2 flex-1">
                       <Label htmlFor="numero" className="text-sm font-medium">Número *</Label>
                       <Input
-                        data-field="address.number"
                         id="numero"
-                        value={form.address.number}
-                        onChange={(e) => onChange("address.number", e.target.value)}
-                        onBlur={() => markTouched("address.number")}
+                        value={form.number}
+                        onChange={(e) => setForm(f => ({ ...f, number: e.target.value }))}
                         required
                         className="h-9"
                         placeholder="123"
                       />
-                      {touched["address.number"] && errors["address.number"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["address.number"]}</p>
-                      )}
                     </div>
                     <div className="space-y-2 flex-1">
                       <Label htmlFor="complemento" className="text-sm font-medium">Complemento</Label>
                       <Input
                         id="complemento"
-                        value={form.address.complement}
-                        onChange={(e) => onChange("address.complement", e.target.value)}
+                        value={form.complement}
+                        onChange={(e) => setForm(f => ({ ...f, complement: e.target.value }))}
                         placeholder="Apto, casa"
                         className="h-9"
                       />
@@ -552,53 +549,38 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
                   <div className="space-y-2">
                     <Label htmlFor="bairro" className="text-sm font-medium">Bairro *</Label>
                     <Input
-                      data-field="address.neighborhood"
                       id="bairro"
-                      value={form.address.neighborhood}
-                      onChange={(e) => onChange("address.neighborhood", e.target.value)}
-                      onBlur={() => markTouched("address.neighborhood")}
+                      value={form.neighborhood}
+                      onChange={(e) => setForm(f => ({ ...f, neighborhood: e.target.value }))}
                       required
                       className="h-9"
                       placeholder="Nome do bairro"
                     />
-                    {touched["address.neighborhood"] && errors["address.neighborhood"] && (
-                      <p className="text-red-600 text-xs mt-1">{errors["address.neighborhood"]}</p>
-                    )}
                   </div>
                   
                   <div className="flex gap-3">
                     <div className="space-y-2 flex-1">
                       <Label htmlFor="cidade" className="text-sm font-medium">Cidade *</Label>
                       <Input
-                        data-field="address.city"
                         id="cidade"
-                        value={form.address.city}
-                        onChange={(e) => onChange("address.city", e.target.value)}
-                        onBlur={() => markTouched("address.city")}
+                        value={form.city}
+                        onChange={(e) => setForm(f => ({ ...f, city: e.target.value }))}
                         required
                         className="h-9"
                         placeholder="Sua cidade"
                       />
-                      {touched["address.city"] && errors["address.city"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["address.city"]}</p>
-                      )}
                     </div>
                     <div className="space-y-2 w-20">
                       <Label htmlFor="estado" className="text-sm font-medium">Estado *</Label>
                       <Input
-                        data-field="address.state"
                         id="estado"
-                        value={form.address.state}
-                        onChange={(e) => onChange("address.state", e.target.value)}
-                        onBlur={() => markTouched("address.state")}
+                        value={form.state}
+                        onChange={(e) => setForm(f => ({ ...f, state: e.target.value }))}
                         maxLength={2}
                         required
                         className="h-9"
                         placeholder="SP"
                       />
-                      {touched["address.state"] && errors["address.state"] && (
-                        <p className="text-red-600 text-xs mt-1">{errors["address.state"]}</p>
-                      )}
                     </div>
                   </div>
 
