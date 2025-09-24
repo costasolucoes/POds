@@ -31,6 +31,25 @@ function safeParse(s: string) {
   try { return JSON.parse(s); } catch { return s; }  // nunca explode
 }
 
+// ---------- Paradise Utils ----------
+type ItemIn = { id:string; name:string; price:number; quantity:number };
+
+function toCart(items: ItemIn[]) {
+  // Paradise espera estes campos:
+  //  - title        (string)
+  //  - unit_price   (number, em CENTAVOS)
+  //  - quantity     (number)
+  return items.map(it => ({
+    title: it.name,
+    unit_price: it.price,     // já em CENTAVOS
+    quantity: it.quantity,
+  }));
+}
+
+function calcAmountCents(items: ItemIn[]) {
+  return items.reduce((acc, it) => acc + (Number(it.price) * Number(it.quantity)), 0);
+}
+
 // ---------- Axios com Keep-Alive ----------
 const keepAliveAgent = new https.Agent({
   keepAlive: true,
@@ -152,40 +171,24 @@ app.post('/checkout', async (req, res) => {
     console.time("checkout_total");
     console.log('[checkout] BODY =', req.body); // ajuda nos logs do Render
 
-    const payload = req.body;
-
-    if (!payload?.items || !Array.isArray(payload.items) || payload.items.length === 0) {
-      return res.status(400).json({ error: 'items é obrigatório' });
+    // garanta que veio items
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!items.length) {
+      return res.status(400).json({ error: "items vazios" });
     }
 
     // frete grátis por regra: +R$15 se <3 itens (como ACRÉSCIMO, não frete)
-    const subtotal = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
-    const totalQty = payload.items.reduce((a, i) => a + i.quantity, 0);
+    const subtotal = items.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    const totalQty = items.reduce((a, i) => a + i.quantity, 0);
     const surchargeCents = totalQty < 3 ? 1500 : 0;
     const totalCents = subtotal + surchargeCents;
 
     const orderId = `ord_${Date.now()}`;
     const postback_url = process.env.POSTBACK_URL || `http://localhost:${process.env.PORT || 3333}/webhooks/paradise`;
     const anchorProductHash = process.env.PARADISE_ANCHOR_PRODUCT_HASH!;
-    const LEAN = process.env.PARADISE_LEAN_BODY === "1";
-
-    // 🔴 HOTFIX: garantir que Paradise sempre receba cart
-    const FORCE_FULL_CART =
-      String(process.env.PARADISE_LEAN || "").toLowerCase() === "false" ||
-      String(process.env.SEND_LEAN_CART || "").toLowerCase() === "false" ||
-      String(process.env.DISABLE_LEAN || "") === "1";
-
-    // função para converter items em cart válido para Paradise
-    function toCart(items: Array<{id:string; name:string; price:number; quantity:number;}>) {
-      return items.map(it => ({
-        title: it.name,
-        unit_price: it.price,     // em CENTAVOS
-        quantity: it.quantity,
-      }));
-    }
 
     // endereço "safe" — sempre válido, independente do que vier do front
-    const a = payload.shipping?.address || {};
+    const a = req.body.shipping?.address || {};
     function pickOr<T>(v: any, fallback: T): T {
       const s = String(v ?? "").trim();
       return (s.length ? (v as any) : fallback) as T;
@@ -203,10 +206,10 @@ app.post('/checkout', async (req, res) => {
     };
 
     const customer = {
-      name: pickOr(payload.customer.name, "Cliente Teste"),
-      email: pickOr(payload.customer.email, "cliente@example.com"),
-      document: onlyDigits(payload.customer.document) || "52998224725",
-      phone_number: onlyDigits(payload.customer.phone) || "11999999999",
+      name: pickOr(req.body.customer.name, "Cliente Teste"),
+      email: pickOr(req.body.customer.email, "cliente@example.com"),
+      document: onlyDigits(req.body.customer.document) || "52998224725",
+      phone_number: onlyDigits(req.body.customer.phone) || "11999999999",
       phone_country_code: "55",
       zip_code: addr.postal_code,
       street_name: addr.line1,
@@ -222,19 +225,7 @@ app.post('/checkout', async (req, res) => {
     const title = `Pedido ${orderId} — ${totalQty} itens${surchargeCents ? " (+R$15)" : ""}`;
     const offer_hash = await getOfferForAmount(totalCents, title);
 
-    // item "âncora" correspondente ao valor total
-    const cartItem = {
-      product_hash: anchorProductHash,
-      offer_hash,
-      offer: offer_hash,
-      quantity: 1,
-      price: totalCents,
-      unit_price: totalCents,
-      split: false,
-      title: `Pedido ${orderId}`,
-    };
-
-    // corpo COMPLETO (LEAN=0) — reduz 422 por validação do gateway
+    // MONTE o body da Paradise
     const paradiseBody: any = {
       payment_method: "pix",
       amount: totalCents,
@@ -244,17 +235,19 @@ app.post('/checkout', async (req, res) => {
       offer: offer_hash,
       quantity: 1,
       customer,
-      metadata: { orderId, surcharge_cents: String(surchargeCents), ...payload.metadata },
+      metadata: { orderId, surcharge_cents: String(surchargeCents), ...req.body.metadata },
       postback_url,
     };
 
-    // 🔴 HOTFIX: se não estiver no modo lean, **sempre** manda o cart
-    if (FORCE_FULL_CART) {
-      paradiseBody.cart = toCart(payload.items);
-    }
+    // 🔴 OBRIGATÓRIO: envie SEMPRE o cart
+    paradiseBody.cart = toCart(items);
 
-    // DEBUG útil (apague depois):
-    console.log("[PAYLOAD->PARADISE]", JSON.stringify(paradiseBody));
+    // DEBUG (ajuda muito agora; remova depois)
+    console.log("[PAYLOAD->PARADISE]", JSON.stringify({
+      amount: paradiseBody.amount,
+      cart_len: paradiseBody.cart?.length,
+      first_cart: paradiseBody.cart?.[0],
+    }, null, 2));
 
     const data = await createPixTransaction(paradiseBody);
 
