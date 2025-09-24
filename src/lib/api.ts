@@ -22,9 +22,30 @@ export function postJson(url: string, body: unknown) {
   });
 }
 
+// Função específica para checkout com parsing robusto
+export async function postCheckout(payload: any) {
+  const r = await fetch(`${API}/checkout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  // Sempre tenta ler JSON; se vier HTML do upstream, devolve como texto
+  const text = await r.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = { error: 'invalid_upstream', detail: text }; }
+
+  if (!r.ok) {
+    // Aqui a API já deve enviar {error, detail, upstreamStatus}
+    const err = typeof data === 'object' ? data : { error: 'http_error', detail: text };
+    throw err;
+  }
+  return data;
+}
+
 // Funções da API
 export const getCep = (zip: string) => fetchJson(`${API}/cep/${zip}`);
-export const checkout = (payload: any) => postJson(`${API}/checkout`, payload);
+export const checkout = (payload: any) => postCheckout(payload);
 export const getTx = (idOrHash: string) => fetchJson(`${API}/tx/${encodeURIComponent(idOrHash)}`);
 
 // Compatibilidade com código existente

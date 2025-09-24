@@ -9,7 +9,8 @@ import { useCart, useCartActions } from '@/contexts/CartContext';
 import { useState, useEffect } from 'react';
 import PaymentModal from './PaymentModal';
 import { buildCheckoutPayload, createCheckout, CartItem } from '@/payments/paradise';
-import { getCep } from '@/lib/api';
+import { getCep, postCheckout } from '@/lib/api';
+import { buildCheckoutPayload as buildPayload } from '@/utils/checkout';
 
 interface CartSidebarProps {
   isOpen: boolean;
@@ -128,85 +129,35 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();              // ❗️ bloqueia qualquer tracking que tente submeter o <form>
+
+    if (loading) return;
     setLoading(true);
-    
+
     try {
-      // Calcular valor total
-      const totalItems = state.items.reduce((total, item) => total + item.quantity, 0);
-      const subtotal = state.subtotal;
-      const shippingFee = totalItems < 3 ? 15 : 0;
-      const totalAmount = state.total;
-      
-      // Converter carrinho para formato do helper
-      const cartItems: CartItem[] = [{
-        id: 'pedido',
-        name: `Pedido com ${totalItems} itens`,
-        price: totalAmount, // Helper converte para centavos
-        quantity: 1
-      }];
+      // ❗️ Montar payload SEM dados do formulário de endereço
+      const payload = buildPayload(state, {}); // sem utm por enquanto
+      const res = await postCheckout(payload);
 
-      // 1) MONTE O PAYLOAD CORRETO
-      const payload = buildCheckoutPayload({
-        items: cartItems,
-        customer: {
-          name: "Cliente Teste",
-          email: "cliente@example.com",
-          document: "52998224725",
-          phone: "+55 (11) 99999-9999",
-        },
-        address: {
-          line1: "Av. Paulista",
-          number: "1000",
-          neighborhood: "Bela Vista",
-          city: "São Paulo",
-          state: "SP",
-          postal_code: "01311-000",
-          country: "BR",
-        },
-        metadata: { origem: "cart-sidebar" },
-      });
-
-      // 2) CHAME A API DO BACK
-      const resp = await createCheckout(payload);
-
-      // 3) SE TIVER checkout_url, redirecione (não é o caso habitual do PIX)
-      if (resp.checkoutUrl) {
-        window.location.href = resp.checkoutUrl;
-        return;
-      }
-
-      // 4) Abra o modal com PIX (copia-e-cola/QR)
-      if (resp.pixCode || resp.qrBase64) {
-        console.log('PIX recebido:', { pixCode: resp.pixCode, qrBase64: resp.qrBase64 });
-        
-        setPixData({
-          brcode: resp.pixCode || undefined,
-          qr_code_base64: resp.qrBase64 || undefined
-        });
+      // sucesso → redireciona se vier checkoutUrl/order_id
+      if (res?.checkoutUrl) {
+        window.location.assign(res.checkoutUrl);
+      } else if (res?.pix) {
+        // Mostrar modal PIX
+        setPixData(res.pix);
         setOrderInfo({
-          id: resp.txId || 'pedido',
-          amount: totalAmount
+          txId: res.tx_id,
+          txHash: res.tx_hash,
+          orderId: res.order_id || `ord_${Date.now()}`
         });
-        
-        console.log('Abrindo modal PIX...');
-        console.log('Dados PIX:', { pixCode: resp.pixCode, qrBase64: resp.qrBase64 });
-        console.log('Dados do pedido:', { id: resp.txId, amount: totalAmount });
-        
         setPixModalOpen(true);
-        console.log('setPixModalOpen(true) executado');
-        
-        // Não limpar o carrinho aqui, deixar para quando o modal PIX for fechado
-        // clearCart();
-        // Não fechar o carrinho aqui, deixar o modal PIX aparecer
-        // onClose();
       } else {
-        console.log('Resposta completa:', resp);
-        throw new Error('PIX não foi gerado corretamente');
+        // fallback: mostre confirmação mínima
+        alert('Pedido criado com sucesso');
       }
-
-    } catch (error) {
-      console.error('Erro:', error);
-      alert(`Erro: ${error instanceof Error ? error.message : 'Desconhecido'}`);
+    } catch (err: any) {
+      console.error('Erro no checkout:', err);
+      alert(`Erro ao finalizar: ${err?.error || 'erro'}\n${(err?.detail || '').toString().slice(0, 400)}`);
     } finally {
       setLoading(false);
     }
@@ -443,7 +394,7 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
           ) : (
             // ETAPA 2: INFORMAÇÕES DE ENTREGA
             <div className="flex-1 overflow-auto py-4 px-4">
-                <form onSubmit={handleSubmit} className="space-y-6">
+                <form onSubmit={handleSubmit} action="#" noValidate className="space-y-6">
                 {/* Dados Pessoais */}
                 <div className="space-y-4">
                   <h3 className="font-semibold text-foreground flex items-center gap-2">
