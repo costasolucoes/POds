@@ -63,45 +63,36 @@ export function buildCheckoutPayload(input: {
 }
 
 export async function createCheckout(payload: any) {
-  const r = await fetch(`${API_BASE}/checkout`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  let data: any = null;
-  try { data = await r.json(); } catch { /* pode vir HTML no 500 */ }
-
-  if (!r.ok) {
-    console.error("Checkout erro:", r.status, data);
+  // Importa a função createCheckout do api.ts
+  const { createCheckout: apiCreateCheckout } = await import('@/lib/api');
+  
+  try {
+    const data = await apiCreateCheckout(payload);
+    
+    const p = data || {};
+    return {
+      checkoutUrl: p.checkout_url || p.checkoutUrl || null,
+      txId: p.tx_id || p.txId || p.id || null,
+      pixCode: p.brcode || p.pix_qr_code || p.copia_e_cola || p.payload || null,
+      qrBase64: p.qr_code_base64 || p.qrBase64 || null,
+      raw: p,
+    };
+  } catch (error: any) {
+    console.error("Checkout erro:", error);
     // ajuda debugar no browser
     console.debug("[checkout payload enviado]", payload);
-    throw data || { error: "checkout_failed", status: r.status };
+    throw error;
   }
-
-  const p = data || {};
-  return {
-    checkoutUrl: p.checkout_url || p.checkoutUrl || null,
-    txId: p.tx_id || p.txId || p.id || null,
-    pixCode: p.brcode || p.pix_qr_code || p.copia_e_cola || p.payload || null,
-    qrBase64: p.qr_code_base64 || p.qrBase64 || null,
-    raw: p,
-  };
 }
 
 // Polling de transação (para o modal)
 export async function getTx(txId: string) {
-  const r = await fetch(`${API_BASE}/tx/${encodeURIComponent(txId)}`);
-  if (!r.ok) throw new Error(`TX ${r.status}`);
-  return r.json();
+  const { getTx: apiGetTx } = await import('@/lib/api');
+  return apiGetTx(txId);
 }
 
 // Lookup de CEP — USO SOMENTE NA UI (não vai pro payload)
 export async function fetchCep(cep: string) {
-  const r = await fetch(`${API_BASE}/cep/${encodeURIComponent(cep)}`);
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(`HTTP ${r.status} /cep: ${JSON.stringify(err)}`);
-  }
-  return r.json();
+  const { getCep } = await import('@/lib/api');
+  return getCep(cep);
 }
