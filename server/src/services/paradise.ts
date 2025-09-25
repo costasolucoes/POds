@@ -16,6 +16,17 @@ if (!API_TOKEN || !PRODUCT_HASH) {
   console.error("Faltam envs PARADISE_API_TOKEN ou PARADISE_PRODUCT_HASH/ANCHOR_PRODUCT(_HASH)");
 }
 
+type CreateOfferResponse = {
+  success?: boolean;
+  status?: number;
+  data?: any;
+  offer_hash?: string;        // alguns clusters retornam direto
+  offer?: { hash?: string };  // outros retornam aninhado
+  price?: number;
+  amount?: number;
+  message?: string;
+};
+
 const api = axios.create({
   baseURL: BASE,
   timeout: 15000,
@@ -30,27 +41,39 @@ export type ParadiseOffer = {
   hash: string; // offer_hash retornado
 };
 
-export async function createOffer(amountCents: number): Promise<ParadiseOffer> {
-  const url = withToken(`/products/${PRODUCT_HASH}/offers`);
+export async function createOffer(params: {
+  productHash: string;
+  amount: number; // em centavos
+  title?: string;
+}): Promise<string | null> {
+  const { productHash, amount, title } = params;
+  const url = `${BASE}/products/${productHash}/offers?api_token=${API_TOKEN}`;
   const body = {
-    title: `Pedido dinâmico — ${amountCents} cents`,
-    price: amountCents,
-    amount: amountCents,
-    unit_price: amountCents,
+    title: title || `Pedido dinâmico — ${amount} cents`,
+    price: amount,
+    amount: amount,
+    unit_price: amount,
   };
-
-  console.log("[paradise] CRIAR OFERTA URL =", api.defaults.baseURL + url);
+  console.log("[paradise] CRIAR OFERTA URL =", url);
   console.log("[paradise] CRIAR OFERTA BODY =", body);
-
   try {
-    const { data } = await api.post(url, body);
-    const offerHash = data?.offer_hash || data?.hash || data?.offer?.hash;
-    if (!offerHash) throw new Error("Sem offer_hash na resposta");
-    return { hash: offerHash };
+    const { data } = await axios.post(url, body, { timeout: 15000 });
+    const resp = data as CreateOfferResponse;
+    console.log("[paradise] CRIAR OFERTA RESP =", JSON.stringify(resp, null, 2));
+    const offerHash =
+      resp?.offer_hash ||
+      resp?.offer?.hash ||
+      resp?.data?.offer_hash ||
+      resp?.data?.offer?.hash ||
+      null;
+    if (!offerHash) {
+      console.warn("[paradise] WARN: createOffer sem hash retornado");
+      return null;
+    }
+    return offerHash;
   } catch (err: any) {
     console.error("create_offer error:", err?.response?.status, err?.response?.data || err?.message);
-    // Fallback: propagar erro para o caller decidir se ignora a oferta
-    throw new Error(`create_offer: HTTP ${err?.response?.status || 500} - ${JSON.stringify(err?.response?.data || {})}`);
+    return null;
   }
 }
 

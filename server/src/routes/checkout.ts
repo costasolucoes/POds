@@ -73,7 +73,7 @@ export async function checkoutHandler(req: Request, res: Response) {
     const subTotal = sumCents(body.items || []);
     const amount = subTotal + shippingCents;
     // total com frete
-    const computedAmount = (amount ?? cartAmount) + shippingCents;
+    const computedAmountFromBody = (amount ?? cartAmount) + shippingCents;
 
     if (amount < 500) {
       // Paradise exige mínimo de R$5,00
@@ -84,13 +84,15 @@ export async function checkoutHandler(req: Request, res: Response) {
       });
     }
 
-    // Offer dinâmica — se falhar (500/{}), seguimos sem a oferta
-    let dynamicOfferHash: string | undefined;
-    try {
-      const offer = await createOffer(amount);
-      dynamicOfferHash = offer.hash;
-    } catch (e) {
-      console.warn("createOffer falhou, seguindo sem offer_hash.", String(e));
+    // Tenta criar oferta dinâmica (se veio offerHash base/produto) SEMPRE que total >= 500
+    let dynamicOfferHash: string | null = null;
+    let effectiveAmount = computedAmountFromBody; // valor final a enviar na transação
+    if (offerHash && effectiveAmount >= 500) {
+      dynamicOfferHash = await createOffer({
+        productHash: offerHash,
+        amount: effectiveAmount,
+        title: `Pedido dinâmico — ${effectiveAmount} cents`,
+      });
     }
 
     // Cliente
@@ -111,18 +113,17 @@ export async function checkoutHandler(req: Request, res: Response) {
       country: (body.customer.country || "br").toLowerCase(),
     };
 
-    // Se houver offer (dinâmica ou fixa), a Paradise ainda exige:
-    // - amount (centavos) coerente com o cart
-    // - offer (ou offer_hash)
-    // - cart (obrigatório)
-    const hasOffer = Boolean(dynamicOfferHash || offerHash);
-    const payload = hasOffer
+    // Decide estratégia:
+    // 1) Se deu para criar oferta dinâmica, usamos ela + amount (coerente) + cart
+    // 2) Se NÃO deu (ou total < 500), enviamos sem offer (amount + cart)
+    const hasDynamicOffer = Boolean(dynamicOfferHash);
+    const payload = hasDynamicOffer
       ? {
           payment_method: body.payment_method || "pix",
-          // Paradise aceita "offer" (recomendado). Mantemos também "offer_hash" por compat.
-          offer: (dynamicOfferHash || offerHash)!,
-          offer_hash: (dynamicOfferHash || offerHash)!,
-          amount: computedAmount,
+          // Paradise aceita "offer" (recomendado). Mantemos "offer_hash" também.
+          offer: dynamicOfferHash!,
+          offer_hash: dynamicOfferHash!,
+          amount: effectiveAmount, // soma(cart) + frete
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -148,7 +149,7 @@ export async function checkoutHandler(req: Request, res: Response) {
         }
       : {
           payment_method: body.payment_method || "pix",
-          amount: computedAmount,
+          amount: effectiveAmount,
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -176,10 +177,28 @@ export async function checkoutHandler(req: Request, res: Response) {
     // Log rápido (ajuda debug em produção)
     console.log(
       "[paradise] BODY (",
-      hasOffer ? "via offer" : "via amount/cart",
+      hasDynamicOffer ? "via offer" : "via amount/cart",
       ") =",
       JSON.stringify(payload, null, 2)
     );
+
+    // Guardas de segurança
+    const payloadAmount = (payload as any).amount ?? 0;
+    if (payloadAmount < 500) {
+      throw new Error("VALOR_MINIMO: O valor da compra precisa ser no mínimo 5 reais (500 centavos).");
+    }
+    // Confere coerência com cart
+    const payloadCart = (payload as any).cart || [];
+    const sumCart = payloadCart.reduce(
+      (s: number, it: any) => s + (it.unit_price * (it.quantity ?? 1)),
+      0
+    );
+    const ship = (payload as any).shipping?.price ?? 0;
+    const expected = sumCart + ship;
+    if (expected !== payloadAmount) {
+      console.warn("[paradise] WARN: amount != soma(cart)+frete. Ajustando automaticamente.");
+      (payload as any).amount = expected;
+    }
 
     // Cria transação PIX
     const data = await createTransaction(payload);
