@@ -64,11 +64,16 @@ export async function checkoutHandler(req: Request, res: Response) {
       quantity: i.quantity ?? 1,
     }));
     // soma total do carrinho em centavos
-    const cartAmount = cart.reduce((sum: number, it: any) => sum + (it.unit_price * (it.quantity ?? 1)), 0);
+    const cartAmount = cart.reduce(
+      (sum: number, it: any) => sum + it.unit_price * (it.quantity ?? 1),
+      0
+    );
 
     const shippingCents = toInt(body?.shipping?.price || 0);
     const subTotal = sumCents(body.items || []);
     const amount = subTotal + shippingCents;
+    // total com frete
+    const computedAmount = (amount ?? cartAmount) + shippingCents;
 
     if (amount < 500) {
       // Paradise exige mínimo de R$5,00
@@ -106,10 +111,10 @@ export async function checkoutHandler(req: Request, res: Response) {
       country: (body.customer.country || "br").toLowerCase(),
     };
 
-    // Se houver offer (dinâmica ou fixa), enviamos:
-    // - amount (obrigatório pela Paradise)
-    // - offer (hash da oferta criada)
-    // - NÃO enviamos cart (para não conflitar com a oferta)
+    // Se houver offer (dinâmica ou fixa), a Paradise ainda exige:
+    // - amount (centavos) coerente com o cart
+    // - offer (ou offer_hash)
+    // - cart (obrigatório)
     const hasOffer = Boolean(dynamicOfferHash || offerHash);
     const payload = hasOffer
       ? {
@@ -117,7 +122,7 @@ export async function checkoutHandler(req: Request, res: Response) {
           // Paradise aceita "offer" (recomendado). Mantemos também "offer_hash" por compat.
           offer: (dynamicOfferHash || offerHash)!,
           offer_hash: (dynamicOfferHash || offerHash)!,
-          amount: amount ?? cartAmount, // manter o total em centavos (ex.: 4990)
+          amount: computedAmount,
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -139,11 +144,11 @@ export async function checkoutHandler(req: Request, res: Response) {
           shipping: { price: shippingCents },
           postback_url: process.env.PARADISE_POSTBACK_URL || process.env.POSTBACK_URL,
           metadata: body.metadata || {},
-          // sem cart quando há oferta
+          cart, // <- cart é obrigatório mesmo com offer
         }
       : {
           payment_method: body.payment_method || "pix",
-          amount: amount ?? cartAmount,
+          amount: computedAmount,
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -169,7 +174,12 @@ export async function checkoutHandler(req: Request, res: Response) {
         };
 
     // Log rápido (ajuda debug em produção)
-    console.log("[paradise] BODY (", hasOffer ? "via offer" : "via amount/cart", ") =", JSON.stringify(payload, null, 2));
+    console.log(
+      "[paradise] BODY (",
+      hasOffer ? "via offer" : "via amount/cart",
+      ") =",
+      JSON.stringify(payload, null, 2)
+    );
 
     // Cria transação PIX
     const data = await createTransaction(payload);
