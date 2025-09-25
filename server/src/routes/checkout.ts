@@ -63,6 +63,8 @@ export async function checkoutHandler(req: Request, res: Response) {
       unit_price: toInt(i.price),
       quantity: i.quantity ?? 1,
     }));
+    // soma total do carrinho em centavos
+    const cartAmount = cart.reduce((sum: number, it: any) => sum + (it.unit_price * (it.quantity ?? 1)), 0);
 
     const shippingCents = toInt(body?.shipping?.price || 0);
     const subTotal = sumCents(body.items || []);
@@ -104,36 +106,63 @@ export async function checkoutHandler(req: Request, res: Response) {
       country: (body.customer.country || "br").toLowerCase(),
     };
 
-    // Monta payload para Paradise
-    const payload: any = {
-      payment_method: body.payment_method || "pix",
-      amount,
-      installments: 1,
-      product_hash: offerHash, // Usa o offerHash como product_hash
-      quantity: 1,
-      customer,
-      metadata: {
-        ...(body.metadata || {}),
-        origem: (body.metadata?.origem || "hostinger"),
-      },
-      postback_url: process.env.PARADISE_POSTBACK_URL || process.env.POSTBACK_URL, // fallback
-      cart, // <- obrigatório p/ Paradise (evita "cart é obrigatório")
-    };
-
-    // Se temos dynamicOfferHash, adiciona como offer_hash também
-    if (dynamicOfferHash) {
-      payload.offer_hash = dynamicOfferHash;
-      payload.offer = dynamicOfferHash;
-    }
+    // Se houver offer (dinâmica ou fixa), NÃO enviamos amount/cart: a Paradise usa o valor da oferta
+    const hasOffer = Boolean(dynamicOfferHash || offerHash);
+    const payload = hasOffer
+      ? {
+          payment_method: body.payment_method || "pix",
+          offer_hash: (dynamicOfferHash || offerHash)!,
+          customer: {
+            name: body.customer?.name,
+            email: body.customer?.email,
+            document: body.customer?.document,
+            phone_number: customer.phone_number,
+            phone_country_code: customer.phone_country_code,
+            zip_code: customer.zip_code,
+            street_name: customer.street_name,
+            number: customer.number,
+            complement: customer.complement,
+            neighborhood: customer.neighborhood,
+            city: customer.city,
+            state: customer.state,
+            country: customer.country,
+          },
+          installments: 1,
+          product_hash: offerHash, // produto âncora
+          quantity: 1,
+          shipping: { price: shippingCents },
+          postback_url: process.env.PARADISE_POSTBACK_URL || process.env.POSTBACK_URL,
+          metadata: body.metadata || {},
+        }
+      : {
+          payment_method: body.payment_method || "pix",
+          amount: amount ?? cartAmount,
+          customer: {
+            name: body.customer?.name,
+            email: body.customer?.email,
+            document: body.customer?.document,
+            phone_number: customer.phone_number,
+            phone_country_code: customer.phone_country_code,
+            zip_code: customer.zip_code,
+            street_name: customer.street_name,
+            number: customer.number,
+            complement: customer.complement,
+            neighborhood: customer.neighborhood,
+            city: customer.city,
+            state: customer.state,
+            country: customer.country,
+          },
+          installments: 1,
+          product_hash: offerHash,
+          quantity: 1,
+          shipping: { price: shippingCents },
+          postback_url: process.env.PARADISE_POSTBACK_URL || process.env.POSTBACK_URL,
+          metadata: body.metadata || {},
+          cart,
+        };
 
     // Log rápido (ajuda debug em produção)
-    console.log("[PAYLOAD->PARADISE]", {
-      amount,
-      cart_len: cart.length,
-      first_cart: cart[0],
-      offerHash,
-      dynamicOfferHash,
-    });
+    console.log("[paradise] BODY (", hasOffer ? "via offer_hash" : "via amount/cart", ") =", JSON.stringify(payload, null, 2));
 
     // Cria transação PIX
     const data = await createTransaction(payload);
