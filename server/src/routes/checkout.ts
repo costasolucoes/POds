@@ -43,18 +43,21 @@ export async function checkoutHandler(req: Request, res: Response) {
     res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
     res.setHeader("Vary", "Origin");
 
-    const body = req.body as CheckoutRequest;
-    
     // Validação e fallback do offerHash
-    const envAnchor = process.env.PARADISE_ANCHOR_PRODUCT;
-    const offerHash = body.offerHash || envAnchor;
+    const body = req.body || {};
+    const offerHash = body.offerHash || process.env.PARADISE_ANCHOR_PRODUCT; // w7jmhixqn2
+    
+    console.log("[DEBUG] body.offerHash:", body.offerHash);
+    console.log("[DEBUG] PARADISE_ANCHOR_PRODUCT:", process.env.PARADISE_ANCHOR_PRODUCT);
+    console.log("[DEBUG] offerHash final:", offerHash);
+    
     if (!offerHash) {
       return res.status(422).json({
         success: false,
         message: "O hash da oferta é obrigatório"
       });
     }
-    const cart = (body.items || []).map((i) => ({
+    const cart = (body.items || []).map((i: any) => ({
       title: i.title,
       unit_price: toInt(i.price),
       quantity: i.quantity ?? 1,

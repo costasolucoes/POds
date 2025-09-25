@@ -154,6 +154,10 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
         metadata: { origem: "hostinger" },
       });
 
+      console.log("[DEBUG] ANCHOR:", ANCHOR);
+      console.log("[DEBUG] payload.offerHash:", payload.offerHash);
+      console.log("[DEBUG] payload completo:", payload);
+
       const resp = await createCheckout(payload);
 
       if (resp.checkoutUrl) { 
