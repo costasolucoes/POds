@@ -45,7 +45,7 @@ export async function checkoutHandler(req: Request, res: Response) {
 
     // Validação e fallback do offerHash
     const body = req.body || {};
-    const offerHash = body.offerHash || process.env.PARADISE_ANCHOR_PRODUCT; // w7jmhixqn2
+    const offerHash = body.offerHash || process.env.PARADISE_ANCHOR_PRODUCT || process.env.PARADISE_PRODUCT_HASH; // fallback
     
     console.log("[DEBUG] body.offerHash:", body.offerHash);
     console.log("[DEBUG] PARADISE_ANCHOR_PRODUCT:", process.env.PARADISE_ANCHOR_PRODUCT);
@@ -58,7 +58,8 @@ export async function checkoutHandler(req: Request, res: Response) {
       });
     }
     const cart = (body.items || []).map((i: any) => ({
-      title: i.title,
+      // aceita title ou name
+      title: i.title || i.name || "Item",
       unit_price: toInt(i.price),
       quantity: i.quantity ?? 1,
     }));
@@ -115,7 +116,7 @@ export async function checkoutHandler(req: Request, res: Response) {
         ...(body.metadata || {}),
         origem: (body.metadata?.origem || "hostinger"),
       },
-      postback_url: process.env.PARADISE_POSTBACK_URL, // ex.: https://pods-p3qt.onrender.com/webhooks/paradise
+      postback_url: process.env.PARADISE_POSTBACK_URL || process.env.POSTBACK_URL, // fallback
       cart, // <- obrigatório p/ Paradise (evita "cart é obrigatório")
     };
 

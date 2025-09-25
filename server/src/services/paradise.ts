@@ -1,11 +1,19 @@
 import axios from "axios";
 
-const BASE = process.env.PARADISE_BASE_URL || "https://api.paradisepagbr.com/api/public/v1";
+// Suporta nomes novos e antigos de env para evitar quebra em produção
+const BASE =
+  process.env.PARADISE_BASE_URL ||
+  process.env.PARADISE_API_BASE || // legacy
+  "https://api.paradisepagbr.com/api/public/v1";
 const API_TOKEN = process.env.PARADISE_API_TOKEN!;
-const PRODUCT_HASH = process.env.PARADISE_PRODUCT_HASH!; // ex: w7jmhixqn2
+const PRODUCT_HASH =
+  process.env.PARADISE_PRODUCT_HASH ||
+  process.env.PARADISE_ANCHOR_PRODUCT || // legacy
+  process.env.PARADISE_ANCHOR_PRODUCT_HASH || // legacy doc
+  "";
 
 if (!API_TOKEN || !PRODUCT_HASH) {
-  console.error("Faltam envs PARADISE_API_TOKEN ou PARADISE_PRODUCT_HASH");
+  console.error("Faltam envs PARADISE_API_TOKEN ou PARADISE_PRODUCT_HASH/ANCHOR_PRODUCT(_HASH)");
 }
 
 const api = axios.create({
