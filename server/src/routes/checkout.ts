@@ -97,11 +97,12 @@ export async function checkoutHandler(req: Request, res: Response) {
       });
       if (created?.hash) {
         dynamicOfferHash = created.hash;
-        // se a Paradise retornou price/amount, respeita:
+        // SEMPRE usa o preço retornado pela Paradise para garantir compatibilidade
         if (typeof created.price === "number" && created.price > 0) {
-          // mantém coerência com frete incluso: created.price geralmente é o preço da oferta,
-          // que idealmente deve ser igual ao valor do carrinho. Se preferir, pode forçar:
-          effectiveAmount = created.price; // como seu frete é 0, fica igual
+          effectiveAmount = created.price;
+          console.log(`[paradise] INFO: Usando preço da oferta: ${created.price} centavos`);
+        } else {
+          console.warn(`[paradise] WARN: Oferta sem preço válido, usando valor calculado: ${effectiveAmount}`);
         }
       }
     }
@@ -222,14 +223,20 @@ export async function checkoutHandler(req: Request, res: Response) {
       const isMinError =
         typeof bodyMsg === "string" &&
         bodyMsg.toLowerCase().includes("minimo 5 reais");
-      if (isMinError) {
-        console.warn("[paradise] INFO: Retentativa com amount decimal BRL string");
+      
+      // Se estamos usando offer_hash, o problema não é formato do amount
+      // A Paradise espera que amount = preço exato da oferta
+      if (isMinError && !hasDynamicOffer) {
+        console.warn("[paradise] INFO: Retentativa com amount decimal BRL string (sem offer)");
         const p2: any = { ...payload };
         // força amount como string decimal BRL
         const cents = (payload as any).amount ?? 0;
         p2.amount = require("../services/paradise").centsToBRLString(cents);
         console.log("[paradise] BODY RETRY =", JSON.stringify(p2, null, 2));
         data = await createTransaction(p2);
+      } else if (isMinError && hasDynamicOffer) {
+        console.error("[paradise] ERROR: Valor mínimo rejeitado mesmo usando offer_hash. Oferta pode estar inválida.");
+        throw new Error("VALOR_MINIMO_COM_OFFER: Paradise rejeitou valor mesmo com offer_hash válido");
       } else {
         throw err;
       }
