@@ -16,16 +16,7 @@ if (!API_TOKEN || !PRODUCT_HASH) {
   console.error("Faltam envs PARADISE_API_TOKEN ou PARADISE_PRODUCT_HASH/ANCHOR_PRODUCT(_HASH)");
 }
 
-type CreateOfferResponse = {
-  success?: boolean;
-  status?: number;
-  data?: any;
-  offer_hash?: string;        // alguns clusters retornam direto
-  offer?: { hash?: string };  // outros retornam aninhado
-  price?: number;
-  amount?: number;
-  message?: string;
-};
+type CreateOfferResponse = any; // formatos variam entre clusters
 
 const api = axios.create({
   baseURL: BASE,
@@ -45,7 +36,7 @@ export async function createOffer(params: {
   productHash: string;
   amount: number; // em centavos
   title?: string;
-}): Promise<string | null> {
+}): Promise<{ hash: string; price?: number } | null> {
   const { productHash, amount, title } = params;
   const url = `${BASE}/products/${productHash}/offers?api_token=${API_TOKEN}`;
   const body = {
@@ -60,17 +51,26 @@ export async function createOffer(params: {
     const { data } = await axios.post(url, body, { timeout: 15000 });
     const resp = data as CreateOfferResponse;
     console.log("[paradise] CRIAR OFERTA RESP =", JSON.stringify(resp, null, 2));
+    // Captura hash em todos os formatos conhecidos
     const offerHash =
+      resp?.hash ||
       resp?.offer_hash ||
-      resp?.offer?.hash ||
+      resp?.data?.hash ||
       resp?.data?.offer_hash ||
+      resp?.offer?.hash ||
       resp?.data?.offer?.hash ||
       null;
+    const price =
+      resp?.price ??
+      resp?.amount ??
+      resp?.data?.price ??
+      resp?.data?.amount ??
+      undefined;
     if (!offerHash) {
-      console.warn("[paradise] WARN: createOffer sem hash retornado");
+      console.warn("[paradise] WARN: createOffer sem hash retornado (formatos testados: hash, offer_hash, data.hash, data.offer_hash, offer.hash, data.offer.hash)");
       return null;
     }
-    return offerHash;
+    return { hash: offerHash, price };
   } catch (err: any) {
     console.error("create_offer error:", err?.response?.status, err?.response?.data || err?.message);
     return null;

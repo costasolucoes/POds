@@ -88,11 +88,20 @@ export async function checkoutHandler(req: Request, res: Response) {
     let dynamicOfferHash: string | null = null;
     let effectiveAmount = computedAmountFromBody; // valor final a enviar na transação
     if (offerHash && effectiveAmount >= 500) {
-      dynamicOfferHash = await createOffer({
+      const created = await createOffer({
         productHash: offerHash,
         amount: effectiveAmount,
         title: `Pedido dinâmico — ${effectiveAmount} cents`,
       });
+      if (created?.hash) {
+        dynamicOfferHash = created.hash;
+        // se a Paradise retornou price/amount, respeita:
+        if (typeof created.price === "number" && created.price > 0) {
+          // mantém coerência com frete incluso: created.price geralmente é o preço da oferta,
+          // que idealmente deve ser igual ao valor do carrinho. Se preferir, pode forçar:
+          effectiveAmount = created.price; // como seu frete é 0, fica igual
+        }
+      }
     }
 
     // Cliente
