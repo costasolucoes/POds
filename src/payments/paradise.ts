@@ -1,98 +1,88 @@
-// payments/paradise.ts
+// src/payments/paradise.ts
+const API_BASE = "https://pods-p3qt.onrender.com"; // <- RENDER (prod)
+
 export type CartItem = { id: string; name: string; price: number | string; quantity: number | string; };
-export type Customer = { name: string; email: string; document: string; phone: string; };
+export type Customer = { name: string; email: string; document?: string; phone?: string; };
+export type Address = { line1: string; number?: string; complement?: string; neighborhood?: string; city: string; state: string; postal_code: string; country?: string; };
 
-const API_BASE = "https://pods-p3qt.onrender.com";
+const toNumber = (v: any) => (typeof v === "number" ? v : parseFloat(String(v).replace(/[^\d.,-]/g, "").replace(",", "."))) || 0;
+const onlyDigits = (s?: string) => (s ?? "").replace(/\D/g, "");
+const toCents = (v: any) => { const num = toNumber(v); if (Number.isInteger(v) && v > 1000) return Number(v); const cents = Math.round(num * 100); return isNaN(cents) ? 0 : cents; };
 
-// OPCIONAL: se quiser forçar um ID/nome de produto base específico:
-const BASE_ITEM_ID = "base-offer";
-const BASE_ITEM_NAME = "Pedido Loja (PIX)";
-
-// ENDEREÇO FIXO — SEMPRE enviado
-const FIXED_ADDRESS = {
-  line1: "Av. Paulista",
-  number: "1000",
-  neighborhood: "Bela Vista",
-  city: "São Paulo",
-  state: "SP",
-  postal_code: "01311-000",
-  country: "BR",
-};
-
-function toCents(v: number | string): number {
-  if (typeof v === "number") return Math.round(v * 100);
-  const clean = String(v).replace(/[^\d,,-.]/g, "").replace(/\./g, "").replace(",", ".");
-  const n = Number.parseFloat(clean);
-  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+export function normalizeCart(items: CartItem[]) {
+  return items.map((it) => ({
+    id: String(it.id),
+    name: String(it.name),
+    price: toCents(it.price),
+    quantity: Math.max(1, parseInt(String(it.quantity), 10) || 1),
+  }));
 }
 
-function sumCartInCents(items: CartItem[]): number {
-  return (items || []).reduce((acc, it) => acc + toCents(it.price) * Number(it.quantity || 1), 0);
-}
-
-export function buildCheckoutPayload(input: {
+// <<< ACEITA offerHash do produto ÂNCORA >>>
+export function buildCheckoutPayload(params: {
+  offerHash: string;            // w7jmhixqn2 (obrigatório no front)
   items: CartItem[];
   customer: Customer;
-  address?: any; // ignorado
+  address: Address;
   metadata?: Record<string, any>;
 }) {
-  if (!input.items || input.items.length === 0) throw new Error("empty_cart");
-
-  const totalInCents = sumCartInCents(input.items);
-  if (totalInCents <= 0) throw new Error("invalid_total");
-
-  // >>>>> AQUI: 1 item base, qty=1, price = TOTAL DO CARRINHO
-  const baseItem = {
-    id: BASE_ITEM_ID || input.items[0].id,
-    name: BASE_ITEM_NAME || input.items[0].name,
-    price: totalInCents,
-    quantity: 1,
-  };
-
+  const items = normalizeCart(params.items);
   return {
-    items: [baseItem],
+    offerHash: params.offerHash,    // <- vai junto!
+    items,
     customer: {
-      name: input.customer.name,
-      email: input.customer.email,
-      document: input.customer.document,
-      phone: input.customer.phone,
+      name: params.customer.name,
+      email: params.customer.email,
+      document: onlyDigits(params.customer.document),
+      phone: params.customer.phone,
     },
-    shipping: { price: 0, address: { ...FIXED_ADDRESS } },
-    metadata: { ...(input.metadata || {}), cartRaw: input.items.map(i => ({ id: i.id, q: i.quantity })) },
+    shipping: {
+      price: 0,
+      address: {
+        line1: params.address.line1,
+        number: params.address.number || "1000",
+        complement: params.address.complement || "",
+        neighborhood: params.address.neighborhood || "Centro",
+        city: params.address.city,
+        state: params.address.state,
+        postal_code: params.address.postal_code,
+        country: params.address.country || "BR",
+      },
+    },
+    metadata: params.metadata || {},
   };
 }
 
-export async function createCheckout(payload: any) {
-  // Importa a função createCheckout do api.ts
-  const { createCheckout: apiCreateCheckout } = await import('@/lib/api');
-  
-  try {
-    const data = await apiCreateCheckout(payload);
-    
-    const p = data || {};
-    return {
-      checkoutUrl: p.checkout_url || p.checkoutUrl || null,
-      txId: p.tx_id || p.txId || p.id || null,
-      pixCode: p.brcode || p.pix_qr_code || p.copia_e_cola || p.payload || null,
-      qrBase64: p.qr_code_base64 || p.qrBase64 || null,
-      raw: p,
-    };
-  } catch (error: any) {
-    console.error("Checkout erro:", error);
-    // ajuda debugar no browser
-    console.debug("[checkout payload enviado]", payload);
-    throw error;
-  }
+export async function createCheckout(payload: ReturnType<typeof buildCheckoutPayload>) {
+  // LOG pra você ver no console o que vai pro back
+  console.log("[checkout payload]", payload);
+
+  const r = await fetch(`${API_BASE}/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify(payload),
+    mode: "cors",
+  });
+
+  const text = await r.text(); // evita quebrar se vier HTML
+  if (!r.ok) throw new Error(`HTTP ${r.status} /checkout -> ${text.slice(0, 300)}`);
+
+  let d: any;
+  try { d = JSON.parse(text); } 
+  catch { throw new Error(`Resposta não-JSON do back: ${text.slice(0, 300)}`); }
+
+  const txId = d.txId || d.tx_hash || d.session?.id || null;
+  const p = d.pix || d.raw?.pix || d || {};
+  const pixCode = p.pix_qr_code || p.brcode || p.copia_e_cola || p.payload || null;
+  const qrBase64 = p.qr_code_base64 || null;
+
+  return { raw: d, txId, checkoutUrl: d.checkout_url || d.payment_url || null, pixCode, qrBase64 };
 }
 
-// Polling de transação (para o modal)
-export async function getTx(txId: string) {
-  const { getTx: apiGetTx } = await import('@/lib/api');
-  return apiGetTx(txId);
-}
-
-// Lookup de CEP — USO SOMENTE NA UI (não vai pro payload)
-export async function fetchCep(cep: string) {
-  const { getCep } = await import('@/lib/api');
-  return getCep(cep);
+// Para o modal/polling
+export async function getTxStatus(txId: string) {
+  const r = await fetch(`${API_BASE}/tx/${encodeURIComponent(txId)}`, { headers: { Accept: "application/json" } });
+  const t = await r.text();
+  if (!r.ok) throw new Error(`HTTP ${r.status} /tx/:id -> ${t.slice(0, 300)}`);
+  return JSON.parse(t);
 }

@@ -12,7 +12,7 @@ import { api } from '@/lib/api';
 import { normalizeCart, formatBRL } from '@/lib/money';
 import { validateFormLite } from '@/lib/validate';
 import { fetchViaCEP } from '@/lib/viacep';
-import { buildCheckoutPayload, createCheckout } from '@/payments/checkout';
+import { buildCheckoutPayload, createCheckout } from '@/payments/paradise';
 
 interface CartSidebarProps {
   isOpen: boolean;
@@ -119,6 +119,8 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
     setBusy(true);
 
     try {
+      const ANCHOR = "w7jmhixqn2"; // produto base único
+      
       const items = state.items.map(i => ({
         id: i.product?.id || 'produto',
         name: i.product?.name || 'Produto',
@@ -144,20 +146,29 @@ const CartSidebar: React.FC<CartSidebarProps> = ({ isOpen, onClose }) => {
         country: "BR",
       };
 
-      const payload = buildCheckoutPayload({ items, customer, address });
-      console.log("[checkout payload]", payload); // deve conter offerHash: "w7jmhixqn2"
+      const payload = buildCheckoutPayload({
+        offerHash: ANCHOR,           // <- AQUI!!!
+        items,
+        customer,
+        address,
+        metadata: { origem: "hostinger" },
+      });
 
       const resp = await createCheckout(payload);
-      if (!resp.txId) throw new Error("checkout_failed");
+
+      if (resp.checkoutUrl) { 
+        window.location.href = resp.checkoutUrl; 
+        return; 
+      }
 
       setPixData({
         brcode: resp.pixCode,
         qr_code_base64: resp.qrBase64,
       });
       setOrderInfo({
-        txId: resp.txId,
-        txHash: resp.txId,
-        orderId: resp.txId,
+        txId: resp.txId || "",
+        txHash: resp.txId || "",
+        orderId: resp.txId || "",
       });
       setPixModalOpen(true);
     } catch (err: any) {
