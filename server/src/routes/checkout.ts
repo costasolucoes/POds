@@ -57,8 +57,10 @@ export async function checkoutHandler(req: Request, res: Response) {
         message: "O hash da oferta é obrigatório"
       });
     }
-    const cart = (body.items || []).map((i: any) => ({
+    const cart = (body.items || []).map((i: any, idx: number) => ({
       // aceita title ou name
+      id: i.id || `item-${idx + 1}`,         // alguns clusters exigem id/sku
+      sku: i.sku || i.id || `sku-${idx + 1}`,// compat opcional
       title: i.title || i.name || "Item",
       unit_price: toInt(i.price),
       quantity: i.quantity ?? 1,
@@ -133,6 +135,7 @@ export async function checkoutHandler(req: Request, res: Response) {
           offer: dynamicOfferHash!,
           offer_hash: dynamicOfferHash!,
           amount: effectiveAmount, // soma(cart) + frete
+          currency: "BRL",
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -145,8 +148,8 @@ export async function checkoutHandler(req: Request, res: Response) {
             complement: customer.complement,
             neighborhood: customer.neighborhood,
             city: customer.city,
-            state: customer.state,
-            country: customer.country,
+            state: (customer.state || "").toUpperCase(),
+            country: (customer.country || "BR").toUpperCase(),
           },
           installments: 1,
           product_hash: offerHash, // produto âncora
@@ -159,6 +162,7 @@ export async function checkoutHandler(req: Request, res: Response) {
       : {
           payment_method: body.payment_method || "pix",
           amount: effectiveAmount,
+          currency: "BRL",
           customer: {
             name: body.customer?.name,
             email: body.customer?.email,
@@ -171,8 +175,8 @@ export async function checkoutHandler(req: Request, res: Response) {
             complement: customer.complement,
             neighborhood: customer.neighborhood,
             city: customer.city,
-            state: customer.state,
-            country: customer.country,
+            state: (customer.state || "").toUpperCase(),
+            country: (customer.country || "BR").toUpperCase(),
           },
           installments: 1,
           product_hash: offerHash,
@@ -210,7 +214,26 @@ export async function checkoutHandler(req: Request, res: Response) {
     }
 
     // Cria transação PIX
-    const data = await createTransaction(payload);
+    let data: any;
+    try {
+      data = await createTransaction(payload);
+    } catch (err: any) {
+      const bodyMsg = err?.response?.data?.message || err?.message || "";
+      const isMinError =
+        typeof bodyMsg === "string" &&
+        bodyMsg.toLowerCase().includes("minimo 5 reais");
+      if (isMinError) {
+        console.warn("[paradise] INFO: Retentativa com amount decimal BRL string");
+        const p2: any = { ...payload };
+        // força amount como string decimal BRL
+        const cents = (payload as any).amount ?? 0;
+        p2.amount = require("../services/paradise").centsToBRLString(cents);
+        console.log("[paradise] BODY RETRY =", JSON.stringify(p2, null, 2));
+        data = await createTransaction(p2);
+      } else {
+        throw err;
+      }
+    }
 
     // Normaliza possíveis campos de retorno (brcode/qr)
     const brcode = data?.brcode || data?.br_code;

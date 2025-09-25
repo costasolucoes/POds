@@ -77,6 +77,12 @@ export async function createOffer(params: {
   }
 }
 
+export function centsToBRLString(cents: number): string {
+  const v = Math.round(cents);
+  const reals = (v / 100).toFixed(2);
+  return reals; // "49.90"
+}
+
 export type ParadiseTxResponse = {
   transaction_hash?: string;
   br_code?: string;
